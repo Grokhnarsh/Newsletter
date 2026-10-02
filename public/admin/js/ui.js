@@ -33,6 +33,11 @@ export function html(strings, ...values) {
 export const $ = (sel, root = document) => root.querySelector(sel);
 export const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
+/** Setzt Text, falls das Element (noch) existiert – z. B. nach einem Seitenwechsel. */
+export function setText(node, text) {
+  if (node) node.textContent = text;
+}
+
 export function setHtml(el, content) {
   el.innerHTML = render(content);
   return el;

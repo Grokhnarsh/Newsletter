@@ -1,64 +1,69 @@
 import { get, post, put, session } from './api.js';
+import { dashboardView } from './dashboard.js';
+import { ICONS, cms, registry } from './registry.js';
+import { settingsView } from './settings.js';
 import { ctx } from './state.js';
 import { $, $$, formData, html, modal, raw, setHtml, toast, toastError } from './ui.js';
-import { campaignEditorView, campaignReportView, campaignsView } from './views/campaigns.js';
-import { dashboardView } from './views/dashboard.js';
-import { listsView } from './views/lists.js';
-import { settingsView } from './views/settings.js';
-import { subscriberDetailView, subscribersView } from './views/subscribers.js';
-import { templateEditorView, templatesView } from './views/templates.js';
 
-const ICONS = {
-  dashboard: '<path d="M3 13h8V3H3zM13 21h8V11h-8zM3 21h8v-6H3zM13 3v6h8V3z"/>',
-  subscribers: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>',
-  lists: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
-  campaigns: '<path d="M22 2 11 13M22 2l-7 20-4-9-9-4z"/>',
-  templates: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/>',
-  settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
-};
-const icon = (name) => raw(`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`);
-const LOGO = raw('<svg width="28" height="28" viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="6" fill="#2a78d6"/><path d="M5 8l7 5 7-5M5 8v8h14V8" stroke="#fff" stroke-width="1.8" fill="none" stroke-linejoin="round"/></svg>');
+const icon = (name) => raw(`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ICONS.modules}</svg>`);
+const LOGO = raw('<svg width="28" height="28" viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="6" fill="#2a78d6"/><path d="M6 7h12M6 12h12M6 17h7" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round"/></svg>');
+const GROUP_ORDER = ['Übersicht', 'Inhalte', 'Newsletter', 'System'];
 
-const NAV = [
-  ['#/', 'Übersicht', 'dashboard'],
-  ['#/campaigns', 'Kampagnen', 'campaigns'],
-  ['#/subscribers', 'Abonnenten', 'subscribers'],
-  ['#/lists', 'Listen', 'lists'],
-  ['#/templates', 'Vorlagen', 'templates'],
-  ['#/settings', 'Einstellungen', 'settings'],
-];
-
-const ROUTES = [
+// Kernansichten; Module ergänzen weitere über die Registry
+const CORE_ROUTES = [
   [/^\/$/, dashboardView],
-  [/^\/subscribers$/, subscribersView],
-  [/^\/subscribers\/(\d+)$/, subscriberDetailView],
-  [/^\/lists$/, listsView],
-  [/^\/campaigns$/, campaignsView],
-  [/^\/campaigns\/new$/, (el) => campaignEditorView(el, null)],
-  [/^\/campaigns\/(\d+)$/, campaignEditorView],
-  [/^\/campaigns\/(\d+)\/report$/, campaignReportView],
-  [/^\/templates$/, templatesView],
-  [/^\/templates\/(new|\d+)$/, templateEditorView],
-  [/^\/settings(?:\/([a-z-]+))?$/, settingsView],
+  [/^\/settings(?:\/([a-z0-9-]+))?$/, settingsView],
 ];
+let modulesLoaded = false;
+
+/** Lädt die Admin-Skripte aller aktiven Module. */
+async function loadModules() {
+  if (modulesLoaded) return;
+  registry.modules = await get('/system/modules');
+  cms.nav({ href: '#/', label: 'Dashboard', icon: 'dashboard', group: 'Übersicht', order: 0 });
+  cms.nav({ href: '#/settings', label: 'Einstellungen', icon: 'settings', group: 'System', order: 90 });
+  for (const mod of registry.modules) {
+    if (!mod.enabled || !mod.admin_entry) continue;
+    try {
+      const entry = await import(mod.admin_entry);
+      entry.default?.(cms);
+    } catch (err) {
+      console.error(`Admin-Skript von ${mod.name} konnte nicht geladen werden`, err);
+      toast(`Modul „${mod.label}“: Admin-Oberfläche konnte nicht geladen werden`, 'error');
+    }
+  }
+  modulesLoaded = true;
+}
 
 const app = document.getElementById('app');
 let cleanup = null;
+
+function navGroups() {
+  const groups = new Map();
+  for (const item of [...registry.nav].sort((a, b) => a.order - b.order)) {
+    if (!groups.has(item.group)) groups.set(item.group, []);
+    groups.get(item.group).push(item);
+  }
+  const rank = (g) => (GROUP_ORDER.includes(g) ? GROUP_ORDER.indexOf(g) : 2.5);
+  return [...groups.entries()].sort((a, b) => rank(a[0]) - rank(b[0]));
+}
 
 function renderShell() {
   setHtml(
     app,
     html`<div class="shell">
       <aside class="sidebar" aria-label="Hauptnavigation">
-        <div class="brand">${LOGO}<span id="brand-name">${ctx.settings?.site_name || 'Newsletter'}</span></div>
-        <nav class="nav">
-          ${NAV.map(([href, label, ic]) => html`<a href="${href}" data-nav="${href}">${icon(ic)}<span>${label}</span></a>`)}
-        </nav>
+        <div class="brand">${LOGO}<span id="brand-name">${ctx.settings?.site_name || 'CMS'}</span></div>
+        <nav class="nav">${navGroups().map(
+          ([group, items]) => html`<div class="nav-group">${group !== 'Übersicht' ? html`<div class="nav-heading">${group}</div>` : ''}
+            ${items.map((n) => html`<a href="${n.href}" data-nav="${n.href}">${icon(n.icon)}<span>${n.label}</span></a>`)}</div>`,
+        )}</nav>
         <div class="spacer"></div>
         <div class="userbox">
           <div class="name">${session.user.name || session.user.email}</div>
           <div class="muted">${session.user.role === 'admin' ? 'Administrator' : 'Redakteur'}</div>
           <div class="actions">
+            <a class="small" href="/" target="_blank" rel="noopener">Website ansehen ↗</a>
             <button class="linklike small" id="account-btn">Mein Konto</button>
             <button class="linklike small" id="logout-btn">Abmelden</button>
           </div>
@@ -76,10 +81,12 @@ function renderShell() {
 }
 
 function highlightNav(path) {
-  $$('.nav a').forEach((a) => {
-    const target = a.dataset.nav.slice(1);
-    a.classList.toggle('active', target === '/' ? path === '/' : path.startsWith(target));
-  });
+  const links = $$('.nav a');
+  const match = links
+    .map((a) => a.dataset.nav.slice(1))
+    .filter((t) => (t === '/' ? path === '/' : path === t || path.startsWith(`${t}/`) || path.startsWith(`${t}?`)))
+    .sort((a, b) => b.length - a.length)[0];
+  links.forEach((a) => a.classList.toggle('active', a.dataset.nav.slice(1) === match));
   $('.shell')?.classList.remove('nav-open');
 }
 
@@ -91,7 +98,7 @@ async function route() {
   const view = $('#view');
   if (typeof cleanup === 'function') cleanup();
   cleanup = null;
-  for (const [re, fn] of ROUTES) {
+  for (const [re, fn] of [...CORE_ROUTES, ...registry.routes]) {
     const m = path.match(re);
     if (m) {
       view.setAttribute('aria-busy', 'true');
@@ -146,7 +153,7 @@ function accountDialog() {
 
 function authCard(title, subtitle, body) {
   return html`<div class="auth"><div class="card">
-    <div class="brand" style="padding:0 0 16px">${LOGO}<span>Newsletter</span></div>
+    <div class="brand" style="padding:0 0 16px">${LOGO}<span>CMS</span></div>
     <h1>${title}</h1><p class="muted">${subtitle}</p>${body}</div></div>`;
 }
 
@@ -156,7 +163,7 @@ function showLogin() {
     app,
     authCard(
       'Anmelden',
-      'Melde dich mit deinem Administrationskonto an.',
+      'Melde dich mit deinem Konto an.',
       html`<form id="login-form">
         <div class="field"><label for="email">E-Mail</label><input id="email" name="email" type="email" required autocomplete="username" autofocus></div>
         <div class="field"><label for="password">Passwort</label><input id="password" name="password" type="password" required autocomplete="current-password"></div>
@@ -183,7 +190,7 @@ function showSetup() {
       'Willkommen! 👋',
       'Lege das erste Administratorkonto an, um loszulegen.',
       html`<form id="setup-form">
-        <div class="field"><label for="site_name">Name des Newsletters</label><input id="site_name" name="site_name" type="text" placeholder="z. B. Firmen-News" required></div>
+        <div class="field"><label for="site_name">Name der Website</label><input id="site_name" name="site_name" type="text" placeholder="z. B. Musterfirma" required></div>
         <div class="field"><label for="name">Dein Name</label><input id="name" name="name" type="text" autocomplete="name"></div>
         <div class="field"><label for="email">E-Mail</label><input id="email" name="email" type="email" required autocomplete="username"></div>
         <div class="field"><label for="password">Passwort</label><input id="password" name="password" type="password" minlength="10" required autocomplete="new-password"><div class="help">Mindestens 10 Zeichen</div></div>
@@ -208,6 +215,7 @@ async function startSession(token, user) {
   session.user = user;
   ctx.lists = null;
   await ctx.getSettings(true).catch(() => null);
+  await loadModules();
   renderShell();
   route();
 }

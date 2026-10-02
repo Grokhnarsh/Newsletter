@@ -1,0 +1,211 @@
+// Admin-Oberfläche des Seiten-Moduls
+import { del, get, post, put } from '/admin/js/api.js';
+import { bindCover, bindRevisions, coverField, openPreview, revisionsCard, seoCard, slugify, statusBadge } from '/admin/js/content-ui.js';
+import { richEditor } from '/admin/js/editor.js';
+import { navigate } from '/admin/js/state.js';
+import { $, confirmDialog, fmtDateTime, fmtNum, formData, html, raw, setHtml, toast, toastError, setText } from '/admin/js/ui.js';
+
+const TEMPLATES = { default: 'Standard', full: 'Volle Breite', landing: 'Landingpage (ohne Titel)' };
+
+async function pagesView(el) {
+  const pages = await get('/pages');
+  setHtml(
+    el,
+    html`<div class="page-head">
+        <div><h1>Seiten</h1><div class="sub">Statische Inhalte deiner Website, hierarchisch organisiert</div></div>
+        <div class="toolbar"><a class="btn btn-primary" href="#/pages/new">+ Neue Seite</a></div>
+      </div>
+      <div class="card"><div class="table-wrap"><table>
+        <thead><tr><th>Titel</th><th>Adresse</th><th>Status</th><th>Geändert</th><th></th></tr></thead>
+        <tbody>${
+          pages.length
+            ? pages.map(
+                (p) => html`<tr class="clickable" data-id="${p.id}">
+                  <td><span class="tree-indent">${'— '.repeat(p.depth)}</span><strong>${p.title}</strong> ${p.is_home ? html`<span class="badge badge-info">Startseite</span>` : ''}</td>
+                  <td class="small"><code>${p.is_home ? '/' : p.path}</code></td>
+                  <td>${statusBadge(p.status)}</td>
+                  <td class="small nowrap">${fmtDateTime(p.updated_at)}<div class="muted">${p.author || ''}</div></td>
+                  <td class="right nowrap">
+                    ${p.status === 'published' ? html`<a class="btn btn-sm" href="${p.is_home ? '/' : p.path}" target="_blank" rel="noopener">Ansehen ↗</a>` : ''}
+                    <button class="btn btn-sm btn-ghost" data-del="${p.id}" aria-label="Löschen">🗑</button>
+                  </td>
+                </tr>`,
+              )
+            : html`<tr><td colspan="5" class="empty">Noch keine Seiten. <a href="#/pages/new">Erste Seite anlegen</a></td></tr>`
+        }</tbody>
+      </table></div></div>`,
+  );
+  $('tbody', el).addEventListener('click', async (e) => {
+    const delBtn = e.target.closest('[data-del]');
+    if (delBtn) {
+      e.stopPropagation();
+      const page = pages.find((p) => p.id === Number(delBtn.dataset.del));
+      if (!(await confirmDialog('Seite löschen', `„${page.title}“ löschen? Unterseiten rücken eine Ebene nach oben.`, { submitLabel: 'Löschen' }))) return;
+      try {
+        await del(`/pages/${page.id}`);
+        toast('Seite gelöscht');
+        pagesView(el);
+      } catch (err) {
+        toastError(err);
+      }
+      return;
+    }
+    if (e.target.closest('a')) return;
+    const tr = e.target.closest('tr[data-id]');
+    if (tr) navigate(`#/pages/${tr.dataset.id}`);
+  });
+}
+
+async function pageEditorView(el, id) {
+  const isNew = id === 'new';
+  const [page, all] = await Promise.all([
+    isNew ? Promise.resolve({ title: '', slug: '', content: '', status: 'draft', template: 'default', parent_id: null, position: 0, revisions: [] }) : get(`/pages/${id}`),
+    get('/pages'),
+  ]);
+  // Mögliche Elternseiten: nicht die Seite selbst und nicht ihre Unterseiten
+  const excluded = new Set();
+  if (!isNew) {
+    excluded.add(page.id);
+    for (const p of all) if (p.parent_id && excluded.has(p.parent_id)) excluded.add(p.id);
+  }
+  const parents = all.filter((p) => !excluded.has(p.id));
+  let slugTouched = !isNew;
+  let dirty = false;
+
+  setHtml(
+    el,
+    html`<div class="page-head">
+        <div><a href="#/pages" class="small">‹ Seiten</a><h1>${isNew ? 'Neue Seite' : page.title}</h1>
+          <div class="sub">${statusBadge(page.status)} ${page.is_home ? html`<span class="badge badge-info">Startseite</span>` : ''} <span id="dirty" class="muted small"></span></div></div>
+        <div class="toolbar">
+          <button class="btn" id="preview">Vorschau</button>
+          ${!isNew && page.status === 'published' ? html`<a class="btn" href="${page.is_home ? '/' : page.path}" target="_blank" rel="noopener">Ansehen ↗</a>` : ''}
+          <button class="btn btn-primary" id="save">Speichern</button>
+        </div>
+      </div>
+      <form id="page-form" class="content-editor" novalidate>
+        <div class="stack">
+          <div class="card">
+            <input class="title-input" name="title" type="text" value="${page.title}" placeholder="Titel der Seite" aria-label="Titel" required>
+            <div class="slug-line"><span>Adresse:</span><code id="slug-base"></code><input name="slug" type="text" value="${page.slug}" aria-label="Slug"></div>
+            <div id="editor"></div>
+          </div>
+        </div>
+        <div class="stack">
+          <div class="card side-card">
+            <h3>Veröffentlichung</h3>
+            <div class="field"><label for="p-status">Status</label><select id="p-status" name="status">
+              <option value="draft" ${page.status === 'draft' ? raw('selected') : ''}>Entwurf</option>
+              <option value="published" ${page.status === 'published' ? raw('selected') : ''}>Veröffentlicht</option>
+            </select></div>
+            ${page.published_at ? html`<p class="muted small">Erstmals veröffentlicht: ${fmtDateTime(page.published_at)}</p>` : ''}
+            ${!isNew ? html`<button type="button" class="btn btn-sm btn-ghost" id="delete" style="color:var(--danger)">Seite löschen</button>` : ''}
+          </div>
+          <div class="card side-card">
+            <h3>Seitenattribute</h3>
+            <div class="field"><label for="p-parent">Übergeordnete Seite</label><select id="p-parent" name="parent_id">
+              <option value="">– keine (oberste Ebene) –</option>
+              ${parents.map((p) => html`<option value="${p.id}" data-path="${p.path}" ${page.parent_id === p.id ? raw('selected') : ''}>${'– '.repeat(p.depth)}${p.title}</option>`)}
+            </select></div>
+            <div class="field"><label for="p-template">Vorlage</label><select id="p-template" name="template">
+              ${Object.entries(TEMPLATES).map(([k, v]) => html`<option value="${k}" ${page.template === k ? raw('selected') : ''}>${v}</option>`)}
+            </select></div>
+            <div class="field"><label for="p-pos">Reihenfolge</label><input id="p-pos" name="position" type="number" min="0" value="${page.position}"></div>
+          </div>
+          <div class="card side-card">${coverField(page.cover_url)}</div>
+          ${seoCard(page)}
+          ${revisionsCard(page.revisions)}
+        </div>
+      </form>`,
+  );
+
+  const form = $('#page-form', el);
+  const markDirty = () => {
+    dirty = true;
+    const d = $('#dirty', el);
+    if (d) d.textContent = '· Ungespeicherte Änderungen';
+  };
+  let ready = false;
+  const editor = richEditor($('#editor', el), { value: page.content, onChange: () => ready && markDirty() });
+  ready = true;
+  const updateBase = () => {
+    const opt = form.parent_id.selectedOptions[0];
+    setText($('#slug-base', el), `${opt?.dataset.path || ''}/`);
+  };
+  updateBase();
+  form.addEventListener('input', (e) => {
+    markDirty();
+    if (e.target.name === 'title' && !slugTouched) form.slug.value = slugify(e.target.value);
+    if (e.target.name === 'slug') slugTouched = true;
+  });
+  form.addEventListener('change', (e) => {
+    markDirty();
+    if (e.target.name === 'parent_id') updateBase();
+  });
+  bindCover(el, markDirty);
+
+  const collect = () => {
+    const d = formData(form);
+    return {
+      ...d,
+      content: editor.getValue(),
+      parent_id: d.parent_id ? Number(d.parent_id) : null,
+      position: Number(d.position) || 0,
+    };
+  };
+
+  $('#save', el).addEventListener('click', async () => {
+    const data = collect();
+    if (!data.title.trim()) return toastError(new Error('Bitte einen Titel angeben'));
+    try {
+      const saved = isNew ? await post('/pages', data) : await put(`/pages/${id}`, data);
+      dirty = false;
+      toast('Seite gespeichert');
+      if (isNew) navigate(`#/pages/${saved.id}`);
+      else pageEditorView(el, id);
+    } catch (err) {
+      toastError(err);
+    }
+  });
+  $('#preview', el).addEventListener('click', () => openPreview('/pages/preview', collect()));
+  $('#delete', el)?.addEventListener('click', async () => {
+    if (!(await confirmDialog('Seite löschen', `„${page.title}“ endgültig löschen?`, { submitLabel: 'Löschen' }))) return;
+    try {
+      await del(`/pages/${id}`);
+      dirty = false;
+      toast('Seite gelöscht');
+      navigate('#/pages');
+    } catch (err) {
+      toastError(err);
+    }
+  });
+  if (!isNew) bindRevisions(el, `/pages/${id}`, () => pageEditorView(el, id));
+
+  const beforeUnload = (e) => {
+    if (dirty) {
+      e.preventDefault();
+      e.returnValue = '';
+    }
+  };
+  window.addEventListener('beforeunload', beforeUnload);
+  return () => window.removeEventListener('beforeunload', beforeUnload);
+}
+
+export default function register(cms) {
+  cms.nav({ href: '#/pages', label: 'Seiten', icon: 'pages', group: 'Inhalte', order: 10 });
+  cms.route(/^\/pages$/, pagesView);
+  cms.route(/^\/pages\/(new|\d+)$/, pageEditorView);
+  cms.widget({
+    id: 'pages',
+    size: 'tile',
+    order: 10,
+    render(el, data) {
+      const p = data.pages || {};
+      setHtml(
+        el,
+        html`<div class="label">Seiten</div><div class="value">${fmtNum(p.total || 0)}</div>
+          <div class="hint">${fmtNum(p.drafts || 0)} Entwürfe · <a href="#/pages/new">Neue Seite</a></div>`,
+      );
+    },
+  });
+}

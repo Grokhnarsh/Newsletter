@@ -47,6 +47,7 @@ export function validate(input, schema, { partial = false } = {}) {
         if (rule.required && value === '') errors[key] = 'Pflichtfeld';
         else if (rule.max && value.length > rule.max) errors[key] = `Maximal ${rule.max} Zeichen`;
         else if (rule.min && value.length < rule.min) errors[key] = `Mindestens ${rule.min} Zeichen`;
+        else if (rule.pattern && value !== '' && !rule.pattern.test(value)) errors[key] = rule.patternMessage || 'Ungültiges Format';
         else out[key] = value;
         break;
       }

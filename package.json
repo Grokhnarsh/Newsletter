@@ -1,7 +1,7 @@
 {
-  "name": "newsletter",
-  "version": "1.0.0",
-  "description": "Selbst gehostetes Newslettersystem mit Double-Opt-in, Kampagnen, Tracking und Admin-Oberfläche",
+  "name": "modular-cms",
+  "version": "2.0.0",
+  "description": "Modulares CMS mit Seiten, Blog, Medien, Menüs und Newsletter – Node.js, SQLite, ohne Build-Schritt",
   "license": "GPL-3.0-only",
   "private": true,
   "type": "module",
@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "express": "^5.2.1",
-    "nodemailer": "^10.0.13"
+    "nodemailer": "^10.0.13",
+    "sanitize-html": "^2.18.0"
   }
 }

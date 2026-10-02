@@ -1,31 +1,76 @@
 import path from 'node:path';
 import express from 'express';
+import { ContentService } from './core/content.js';
+import { HookBus } from './core/hooks.js';
+import { ModuleManager } from './core/modules.js';
+import { authRoutes } from './core/routes/auth.js';
+import { systemRoutes } from './core/routes/system.js';
+import { SettingsService } from './core/settings.js';
+import { SITE_SETTINGS, SiteService } from './core/site.js';
+import { UserService } from './core/users.js';
 import { authenticate } from './middleware/auth.js';
 import { errorHandler, notFoundHandler } from './middleware/errors.js';
-import { adminRoutes } from './routes/admin.js';
-import { authRoutes } from './routes/auth.js';
-import { campaignRoutes } from './routes/campaigns.js';
-import { publicRoutes } from './routes/public.js';
-import { listRoutes, subscriberRoutes, templateRoutes, webhookRoutes } from './routes/subscribers.js';
-import { CampaignService } from './services/campaigns.js';
-import { DeliveryService } from './services/delivery.js';
-import { ListService } from './services/lists.js';
-import { SettingsService } from './services/settings.js';
-import { StatsService } from './services/stats.js';
-import { SubscriberService } from './services/subscribers.js';
-import { TemplateService } from './services/templates.js';
-import { UserService } from './services/users.js';
+import { builtinModules } from './modules/index.js';
 
-export function createServices({ db, config, mailer, logger = console }) {
+/**
+ * Baut das CMS zusammen: Kern-Services, Module (inkl. Migrationen) und die Express-App.
+ * Rückgabe: { app, ctx } – `ctx` ist der gemeinsame Kontext aller Module.
+ */
+export async function createCms({ db, config, mailer, logger = console, modules: moduleList = builtinModules }) {
   const settings = new SettingsService(db);
+  const manager = new ModuleManager({ settings, logger });
+  const isEnabled = (name) => manager.isEnabled(name);
+  const hooks = new HookBus({ isEnabled, logger });
+  const content = new ContentService({ db, hooks, isEnabled });
+  const site = new SiteService({ config, settings, hooks, content, logger });
   const users = new UserService(db, config);
-  const lists = new ListService(db);
-  const subscribers = new SubscriberService(db);
-  const templates = new TemplateService(db);
-  const campaigns = new CampaignService(db, { templates, settings });
-  const delivery = new DeliveryService({ db, config, mailer, settings, templates, campaigns, subscribers, logger });
-  const stats = new StatsService(db, { campaigns });
-  return { db, config, mailer, logger, settings, users, lists, subscribers, templates, campaigns, delivery, stats };
+
+  settings.register('core', SITE_SETTINGS.defaults, SITE_SETTINGS.rules);
+  for (const mod of moduleList) manager.add(mod);
+  await manager.loadDirectory(config.modulesDir);
+  manager.resolve();
+  manager.registerSettings();
+  manager.migrate(db);
+  await site.loadTheme(config.theme);
+
+  // Gemeinsamer Kontext; Module hängen ihre Services direkt an (z. B. ctx.subscribers).
+  const ctx = { db, config, mailer, logger, settings, hooks, content, site, users, modules: manager };
+  manager.setup(ctx);
+
+  const app = express();
+  app.disable('x-powered-by');
+  if (config.trustProxy) app.set('trust proxy', 1);
+  app.use(securityHeaders);
+  app.get('/health', (req, res) => res.json({ ok: true }));
+
+  // Admin-Oberfläche: Kern + Skripte der Module
+  const staticOpts = { maxAge: config.env === 'production' ? '1h' : 0 };
+  app.use('/admin', express.static(path.join(config.root, 'public', 'admin'), { index: 'index.html', ...staticOpts }));
+  for (const mod of manager.list()) {
+    if (mod.adminDir) app.use(`/admin/modules/${mod.name}`, express.static(mod.adminDir, staticOpts));
+  }
+
+  // REST-API
+  const auth = authenticate(users);
+  const api = express.Router();
+  api.use('/subscribers/import', express.json({ limit: '20mb' }));
+  api.use((req, res, next) => (req.path.startsWith('/media') && req.method === 'POST' ? next() : express.json({ limit: '2mb' })(req, res, next)));
+  api.use('/auth', authRoutes(ctx, auth));
+  for (const router of manager.mount('publicApi', ctx)) api.use(router);
+  api.use(auth);
+  api.use(systemRoutes(ctx));
+  for (const router of manager.mount('api', ctx)) api.use(router);
+  api.use(notFoundHandler);
+  app.use('/api', api);
+
+  // Öffentliche Website: Modulrouten, Kernrouten, dann Fallbacks (z. B. Seiten-Slugs)
+  for (const router of manager.mount('publicRoutes', ctx)) app.use(router);
+  app.use(site.routes());
+  for (const router of manager.mount('fallbackRoutes', ctx)) app.use(router);
+  app.use((req, res) => site.notFound(req, res));
+  app.use(errorHandler(logger, site));
+
+  return { app, ctx };
 }
 
 function securityHeaders(req, res, next) {
@@ -33,45 +78,17 @@ function securityHeaders(req, res, next) {
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'SAMEORIGIN',
     'Referrer-Policy': 'strict-origin-when-cross-origin',
-    'Content-Security-Policy':
-      "default-src 'self'; img-src 'self' data: https: http:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-src 'self' blob: data:; object-src 'none'; base-uri 'self'; form-action 'self'",
+    'Content-Security-Policy': [
+      "default-src 'self'",
+      "img-src 'self' data: https: http:",
+      "media-src 'self' https:",
+      "style-src 'self' 'unsafe-inline'",
+      "script-src 'self'",
+      "frame-src 'self' blob: data: https://www.youtube-nocookie.com https://www.youtube.com https://player.vimeo.com",
+      "object-src 'none'",
+      "base-uri 'self'",
+      "form-action 'self'",
+    ].join('; '),
   });
   next();
-}
-
-export function createApp(services) {
-  const { config, logger, users } = services;
-  const app = express();
-  app.disable('x-powered-by');
-  if (config.trustProxy) app.set('trust proxy', 1);
-  app.use(securityHeaders);
-
-  app.get('/health', (req, res) => res.json({ ok: true }));
-
-  // Öffentliche Seiten & Tracking (eigene Body-Parser mit kleinen Limits)
-  app.use(publicRoutes(services));
-
-  // Admin-Oberfläche (statische Single-Page-App)
-  const adminDir = path.join(config.root, 'public', 'admin');
-  app.use('/admin', express.static(adminDir, { index: 'index.html', maxAge: config.env === 'production' ? '1h' : 0 }));
-
-  // REST-API
-  const auth = authenticate(users);
-  const api = express.Router();
-  api.use('/subscribers/import', express.json({ limit: '20mb' }));
-  api.use(express.json({ limit: '2mb' }));
-  api.use('/auth', authRoutes(services, auth));
-  api.use(auth);
-  api.use('/subscribers', subscriberRoutes(services));
-  api.use('/lists', listRoutes(services));
-  api.use('/templates', templateRoutes(services));
-  api.use('/campaigns', campaignRoutes(services));
-  api.use('/webhooks', webhookRoutes(services));
-  api.use(adminRoutes(services));
-  api.use(notFoundHandler);
-  app.use('/api', api);
-
-  app.use(notFoundHandler);
-  app.use(errorHandler(logger));
-  return app;
 }

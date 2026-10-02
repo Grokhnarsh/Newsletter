@@ -1,5 +1,5 @@
 import { forbidden, unauthorized } from '../lib/errors.js';
-import { API_KEY_PREFIX } from '../services/users.js';
+import { API_KEY_PREFIX } from '../core/users.js';
 
 /**
  * Authentifiziert per `Authorization: Bearer <token>` (Sitzung oder API-Schlüssel)
