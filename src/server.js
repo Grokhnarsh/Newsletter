@@ -1,33 +1,32 @@
-import { createApp, createServices } from './app.js';
+import { createCms } from './app.js';
 import { loadConfig } from './config.js';
 import { openDatabase } from './db/index.js';
 import { createMailer } from './lib/mailer.js';
-import { seedDefaults } from './services/bootstrap.js';
 
 const config = loadConfig();
 const db = openDatabase(config.databasePath);
 const mailer = createMailer(config.mail);
-const services = createServices({ db, config, mailer });
+const { app, ctx } = await createCms({ db, config, mailer });
 
 // Optional: erstes Administratorkonto aus Umgebungsvariablen anlegen
-if (config.initialAdmin.email && config.initialAdmin.password && services.users.count() === 0) {
-  services.users.create({ email: config.initialAdmin.email.toLowerCase(), password: config.initialAdmin.password, role: 'admin', name: 'Administrator' });
-  seedDefaults(services);
+if (config.initialAdmin.email && config.initialAdmin.password && ctx.users.count() === 0) {
+  const user = ctx.users.create({ email: config.initialAdmin.email.toLowerCase(), password: config.initialAdmin.password, role: 'admin', name: 'Administrator' });
+  ctx.hooks.collect('system.setup', { user });
   console.log(`Administrator ${config.initialAdmin.email} angelegt.`);
 }
 
-const app = createApp(services);
 const server = app.listen(config.port, config.host, () => {
-  console.log(`Newsletter-Server läuft auf ${config.baseUrl}`);
+  console.log(`CMS läuft auf ${config.baseUrl}`);
   console.log(`Admin-Oberfläche: ${config.baseUrl}/admin/`);
+  console.log(`Module: ${ctx.modules.describe().map((m) => `${m.name}${m.enabled ? '' : ' (aus)'}`).join(', ')}`);
   console.log(`Mail-Transport: ${mailer.kind}${mailer.kind === 'file' ? ` (${config.mail.outboxDir})` : ''}`);
 });
 
-if (config.worker.enabled) services.delivery.start();
+await ctx.modules.start(ctx);
 
-function shutdown(signal) {
+async function shutdown(signal) {
   console.log(`${signal} empfangen – fahre herunter …`);
-  services.delivery.stop();
+  await ctx.modules.stop(ctx);
   server.close(() => {
     mailer.close();
     db.close();

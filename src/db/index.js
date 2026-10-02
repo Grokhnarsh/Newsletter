@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { migrations } from './migrations.js';
+import { coreMigrations } from './migrations.js';
 
 /**
  * Dünner Wrapper um node:sqlite mit Hilfsfunktionen für Abfragen und
@@ -60,14 +60,30 @@ export class Database {
     }
   }
 
-  migrate() {
+  /**
+   * Führt ausstehende Migrationen aus. Der Kern nutzt `schema_migrations`
+   * (kompatibel zu älteren Installationen), Module `module_migrations`.
+   */
+  migrate(migrations = coreMigrations, module = 'core') {
     this.exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
-    const applied = new Set(this.all('SELECT version FROM schema_migrations').map((r) => r.version));
+    this.exec(
+      'CREATE TABLE IF NOT EXISTS module_migrations (module TEXT NOT NULL, version INTEGER NOT NULL, applied_at TEXT NOT NULL, PRIMARY KEY (module, version))',
+    );
+    const applied = new Set(
+      (module === 'core'
+        ? this.all('SELECT version FROM schema_migrations')
+        : this.all('SELECT version FROM module_migrations WHERE module = ?', module)
+      ).map((r) => r.version),
+    );
     for (const migration of migrations) {
       if (applied.has(migration.version)) continue;
       this.transaction(() => {
         this.exec(migration.sql);
-        this.run('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)', migration.version, new Date().toISOString());
+        if (module === 'core') {
+          this.run('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)', migration.version, new Date().toISOString());
+        } else {
+          this.run('INSERT INTO module_migrations (module, version, applied_at) VALUES (?, ?, ?)', module, migration.version, new Date().toISOString());
+        }
       });
     }
   }
