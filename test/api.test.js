@@ -11,6 +11,10 @@ describe('Authentifizierung & Einrichtung', () => {
 
   test('Einrichtung nur einmal möglich', async () => {
     assert.deepEqual((await t.get('/api/auth/status')).data, { needs_setup: true });
+    const account = { email: 'fremd@example.com', password: 'sehrgeheim123' };
+    assert.equal((await t.post('/api/auth/setup', account)).status, 400, 'ohne Einrichtungscode');
+    assert.equal((await t.post('/api/auth/setup', { ...account, setup_token: 'geraten' })).status, 400, 'falscher Einrichtungscode');
+    assert.deepEqual((await t.get('/api/auth/status')).data, { needs_setup: true });
     const res = await t.setupAdmin();
     assert.equal(res.status, 201);
     assert.equal(res.data.user.role, 'admin');
@@ -56,6 +60,42 @@ describe('Authentifizierung & Einrichtung', () => {
     const me = (await t.get('/api/auth/me')).data;
     assert.equal((await t.del(`/api/users/${me.id}`)).status, 400);
     assert.equal((await t.put(`/api/users/${me.id}`, { role: 'editor' })).status, 400);
+  });
+
+  test('Login-Sperre zählt nur Fehlversuche (pro Konto)', async () => {
+    for (let i = 0; i < 25; i++) {
+      assert.equal((await t.post('/api/auth/login', { email: 'admin@example.com', password: 'sehrgeheim123' }, { auth: false })).status, 200);
+    }
+    await t.post('/api/users', { email: 'sperre@example.com', password: 'sperrkonto123', role: 'editor' });
+    for (let i = 0; i < 10; i++) await t.post('/api/auth/login', { email: 'sperre@example.com', password: 'falsch12345' }, { auth: false });
+    const locked = await t.post('/api/auth/login', { email: 'sperre@example.com', password: 'sperrkonto123' }, { auth: false });
+    assert.equal(locked.status, 429);
+    assert.equal((await t.post('/api/auth/login', { email: 'admin@example.com', password: 'sehrgeheim123' }, { auth: false })).status, 200, 'andere Konten bleiben nutzbar');
+  });
+
+  test('E-Mail-Adresse nur mit aktuellem Passwort änderbar', async () => {
+    await t.post('/api/users', { email: 'konto@example.com', password: 'kontopasswort1', role: 'editor' });
+    const h = { Authorization: `Bearer ${(await t.post('/api/auth/login', { email: 'konto@example.com', password: 'kontopasswort1' }, { auth: false })).data.token}` };
+    assert.equal((await t.put('/api/auth/me', { email: 'neu@example.com' }, { headers: h })).status, 400);
+    assert.equal((await t.put('/api/auth/me', { name: 'Nur Name' }, { headers: h })).status, 200);
+    const ok = await t.put('/api/auth/me', { email: 'neu@example.com', current_password: 'kontopasswort1' }, { headers: h });
+    assert.equal(ok.data.email, 'neu@example.com');
+  });
+
+  test('große Anfragen ohne Anmeldung werden nicht gelesen', async () => {
+    const big = JSON.stringify({ csv: 'x'.repeat(500_000) });
+    const res = await t.request('POST', '/api/subscribers/import', { raw: big, headers: { 'Content-Type': 'application/json' }, auth: false });
+    assert.equal(res.status, 413);
+  });
+
+  test('API-Schlüssel eines gelöschten Benutzers werden ungültig', async () => {
+    await t.post('/api/users', { email: 'admin2@example.com', password: 'sehrgeheim123', role: 'admin' });
+    const login = await t.post('/api/auth/login', { email: 'admin2@example.com', password: 'sehrgeheim123' }, { auth: false });
+    const key = (await t.post('/api/api-keys', { name: 'Alt' }, { headers: { Authorization: `Bearer ${login.data.token}` } })).data;
+    const h = { Authorization: `Bearer ${key.key}` };
+    assert.equal((await t.get('/api/lists', { headers: h })).status, 200);
+    await t.del(`/api/users/${login.data.user.id}`);
+    assert.equal((await t.get('/api/lists', { headers: h })).status, 401);
   });
 
   test('API-Schlüssel', async () => {
@@ -164,7 +204,7 @@ describe('Öffentliche Anmeldung & Double-Opt-in', () => {
 
   test('Anmeldung → Bestätigungs-Mail → Bestätigung → Willkommens-Mail', async () => {
     await t.put('/api/settings', { welcome_enabled: true });
-    const res = await t.post('/api/public/subscribe', { email: 'Lea@Example.com', first_name: 'Lea' }, { auth: false });
+    const res = await t.post('/api/public/subscribe', { email: 'Lea@Example.com', first_name: 'Lea', consent: true }, { auth: false });
     assert.equal(res.status, 200);
     assert.equal(res.headers.get('access-control-allow-origin'), '*');
     const sub = (await t.get('/api/subscribers?q=lea')).data.items[0];
@@ -179,7 +219,12 @@ describe('Öffentliche Anmeldung & Double-Opt-in', () => {
     const confirmUrl = urls(mail.html).find((u) => u.includes('/confirm/'));
     assert.ok(confirmUrl);
 
-    const page = await t.get(pathOf(confirmUrl), { auth: false });
+    // GET bestätigt nicht (Link-Scanner), sondern zeigt einen Knopf
+    const ask = await t.get(pathOf(confirmUrl), { auth: false });
+    assert.equal(ask.status, 200);
+    assert.match(ask.data, /Ja, Anmeldung bestätigen/);
+    assert.equal((await t.get(`/api/subscribers/${sub.id}`)).data.status, 'pending');
+    const page = await t.request('POST', pathOf(confirmUrl), { form: {}, auth: false });
     assert.equal(page.status, 200);
     assert.match(page.data, /Anmeldung bestätigt/);
     assert.equal((await t.get(`/api/subscribers/${sub.id}`)).data.status, 'active');
@@ -187,30 +232,38 @@ describe('Öffentliche Anmeldung & Double-Opt-in', () => {
     assert.match(t.mailer.sent[1].subject, /Willkommen/);
 
     // Erneutes Aufrufen ist harmlos
+    assert.equal((await t.request('POST', pathOf(confirmUrl), { form: {}, auth: false })).status, 200);
     assert.equal((await t.get(pathOf(confirmUrl), { auth: false })).status, 200);
     assert.equal(t.mailer.sent.length, 2);
   });
 
   test('gleiche Antwort für bekannte Adressen (keine Enumeration)', async () => {
-    const res = await t.post('/api/public/subscribe', { email: 'lea@example.com' }, { auth: false });
+    const extra = (await t.post('/api/lists', { name: 'Zusatz', is_public: true })).data;
+    const res = await t.post('/api/public/subscribe', { email: 'lea@example.com', consent: true, list_ids: [extra.id] }, { auth: false });
     assert.equal(res.status, 200);
     assert.equal(t.mailer.sent.length, 2, 'aktive Abonnenten erhalten keine neue Bestätigung');
+    const lea = (await t.get('/api/subscribers?q=lea')).data.items[0];
+    assert.ok(!lea.list_ids.includes(extra.id), 'Dritte können aktive Abonnenten keinen weiteren Listen zuordnen');
+    await t.del(`/api/lists/${extra.id}`);
   });
 
   test('Honeypot und Validierung', async () => {
     const before = t.mailer.sent.length;
-    const bot = await t.post('/api/public/subscribe', { email: 'bot@example.com', website: 'spam' }, { auth: false });
+    const bot = await t.post('/api/public/subscribe', { email: 'bot@example.com', website: 'spam', consent: true }, { auth: false });
     assert.equal(bot.status, 200);
     assert.equal((await t.get('/api/subscribers?q=bot')).data.total, 0);
     assert.equal(t.mailer.sent.length, before);
-    assert.equal((await t.post('/api/public/subscribe', { email: 'kaputt' }, { auth: false })).status, 400);
+    assert.equal((await t.post('/api/public/subscribe', { email: 'kaputt', consent: true }, { auth: false })).status, 400);
+    const noConsent = await t.post('/api/public/subscribe', { email: 'ohne@example.com' }, { auth: false });
+    assert.equal(noConsent.status, 400, 'Einwilligung ist Pflicht');
+    assert.equal((await t.get('/api/subscribers?q=ohne')).data.total, 0);
   });
 
   test('HTML-Formular und nicht-öffentliche Listen', async () => {
     const hidden = (await t.post('/api/lists', { name: 'Geheim', is_public: false })).data;
     const page = await t.get('/subscribe', { auth: false });
     assert.match(page.data, /<form method="post" action="\/subscribe">/);
-    const res = await t.request('POST', '/subscribe', { form: { email: 'form@example.com', list_ids: String(hidden.id) }, headers: { Accept: 'text/html' }, auth: false });
+    const res = await t.request('POST', '/subscribe', { form: { email: 'form@example.com', consent: '1', list_ids: String(hidden.id) }, headers: { Accept: 'text/html' }, auth: false });
     assert.equal(res.status, 200);
     assert.match(res.data, /Fast geschafft/);
     const sub = (await t.get('/api/subscribers?q=form')).data.items[0];
@@ -219,8 +272,24 @@ describe('Öffentliche Anmeldung & Double-Opt-in', () => {
 
   test('ohne Double-Opt-in sofort aktiv', async () => {
     await t.put('/api/settings', { double_opt_in: false });
-    await t.post('/api/public/subscribe', { email: 'direkt@example.com' }, { auth: false });
-    assert.equal((await t.get('/api/subscribers?q=direkt')).data.items[0].status, 'active');
+    await t.post('/api/public/subscribe', { email: 'direkt@example.com', consent: true }, { auth: false });
+    const direkt = (await t.get('/api/subscribers?q=direkt')).data.items[0];
+    assert.equal(direkt.status, 'active');
+    // Abgemeldete Adressen kann niemand ohne Bestätigung wieder aktivieren
+    await t.put(`/api/subscribers/${direkt.id}`, { status: 'unsubscribed' });
+    const before = t.mailer.sent.length;
+    await t.post('/api/public/subscribe', { email: 'direkt@example.com', consent: true }, { auth: false });
+    assert.equal((await t.get(`/api/subscribers/${direkt.id}`)).data.status, 'pending');
+    assert.equal(t.mailer.sent.length, before + 1);
+    assert.match(t.mailer.sent.at(-1).html, /\/confirm\//);
+    await t.put('/api/settings', { double_opt_in: true });
+  });
+
+  test('höchstens eine Bestätigungs-Mail pro Adresse und Tag', async () => {
+    const before = t.mailer.sent.length;
+    for (let i = 0; i < 5; i++) await t.post('/api/public/subscribe', { email: 'opfer@example.com', consent: true }, { auth: false });
+    assert.equal(t.mailer.sent.filter((m) => m.to === 'opfer@example.com').length, 1);
+    assert.equal(t.mailer.sent.length, before + 1);
   });
 
   test('Präferenzen, Datenexport und Löschung', async () => {
@@ -237,14 +306,33 @@ describe('Öffentliche Anmeldung & Double-Opt-in', () => {
     assert.deepEqual(after1.list_ids, [extra.id]);
     assert.ok(lists.length >= 1);
 
-    const exp = await t.get(`/preferences/${sub.token}/export`, { auth: false });
+    // Datenexport nur über den Link aus der E-Mail
+    const plain = await t.get(`/preferences/${sub.token}/export`, { auth: false });
+    assert.match(plain.data, /Link per E-Mail senden/);
+    assert.equal(typeof plain.data, 'string', 'keine JSON-Daten ohne Link');
+    let sentBefore = t.mailer.sent.length;
+    await t.request('POST', `/preferences/${sub.token}/export`, { form: {}, auth: false });
+    assert.equal(t.mailer.sent.length, sentBefore + 1);
+    const exportUrl = urls(t.mailer.sent.at(-1).html).find((u) => u.includes('/export?'));
+    assert.ok(exportUrl);
+    const exp = await t.get(pathOf(exportUrl), { auth: false });
     assert.equal(exp.data.email, 'lea@example.com');
     assert.equal(exp.data.token, undefined);
+    const forged = await t.get(pathOf(exportUrl).replace(/sig=[^&]+/, 'sig=falsch'), { auth: false });
+    assert.equal(typeof forged.data, 'string', 'gefälschte Signatur liefert keine Daten');
 
+    // Löschen: Rückfrage → Bestätigungs-Mail → Link → endgültig löschen
     const ask = await t.request('POST', `/preferences/${sub.token}/delete`, { form: {}, auth: false });
     assert.match(ask.data, /endgültig/);
-    assert.equal((await t.get(`/api/subscribers/${sub.id}`)).status, 200);
-    await t.request('POST', `/preferences/${sub.token}/delete`, { form: { confirm: '1' }, auth: false });
+    sentBefore = t.mailer.sent.length;
+    const mailStep = await t.request('POST', `/preferences/${sub.token}/delete`, { form: { confirm: '1' }, auth: false });
+    assert.match(mailStep.data, /E-Mail/);
+    assert.equal((await t.get(`/api/subscribers/${sub.id}`)).status, 200, 'ohne Link aus der Mail wird nichts gelöscht');
+    assert.equal(t.mailer.sent.length, sentBefore + 1);
+    const deleteUrl = urls(t.mailer.sent.at(-1).html).find((u) => u.includes('/delete?'));
+    const confirmPage = await t.get(pathOf(deleteUrl), { auth: false });
+    assert.match(confirmPage.data, /Endgültig löschen/);
+    await t.request('POST', pathOf(deleteUrl), { form: { confirm: '1' }, auth: false });
     assert.equal((await t.get(`/api/subscribers/${sub.id}`)).status, 404);
     assert.equal((await t.get(`/preferences/${sub.token}`, { auth: false })).status, 404);
   });

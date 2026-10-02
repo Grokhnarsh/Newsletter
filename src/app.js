@@ -8,7 +8,8 @@ import { systemRoutes } from './core/routes/system.js';
 import { SettingsService } from './core/settings.js';
 import { SITE_SETTINGS, SiteService } from './core/site.js';
 import { UserService } from './core/users.js';
-import { authenticate } from './middleware/auth.js';
+import { authenticate, identify } from './middleware/auth.js';
+import { randomToken } from './lib/security.js';
 import { errorHandler, notFoundHandler } from './middleware/errors.js';
 import { builtinModules } from './modules/index.js';
 
@@ -35,6 +36,8 @@ export async function createCms({ db, config, mailer, logger = console, modules:
 
   // Gemeinsamer Kontext; Module hängen ihre Services direkt an (z. B. ctx.subscribers).
   const ctx = { db, config, mailer, logger, settings, hooks, content, site, users, modules: manager };
+  // Einmaliger Einrichtungscode: ohne ihn kann niemand das erste Administratorkonto anlegen.
+  ctx.setupToken = config.setupToken || randomToken(12);
   manager.setup(ctx);
 
   const app = express();
@@ -53,8 +56,14 @@ export async function createCms({ db, config, mailer, logger = console, modules:
   // REST-API
   const auth = authenticate(users);
   const api = express.Router();
-  api.use('/subscribers/import', express.json({ limit: '20mb' }));
-  api.use((req, res, next) => (req.path.startsWith('/media') && req.method === 'POST' ? next() : express.json({ limit: '2mb' })(req, res, next)));
+  // Große Anfragen werden nur nach erfolgreicher Anmeldung gelesen.
+  const parsers = { anonymous: express.json({ limit: '100kb' }), user: express.json({ limit: '2mb' }), import: express.json({ limit: '20mb' }) };
+  api.use(identify(users));
+  api.use((req, res, next) => {
+    if (!req.auth) return parsers.anonymous(req, res, next);
+    if (req.path.startsWith('/media') && req.method === 'POST') return next();
+    return (req.path.startsWith('/subscribers/import') ? parsers.import : parsers.user)(req, res, next);
+  });
   api.use('/auth', authRoutes(ctx, auth));
   for (const router of manager.mount('publicApi', ctx)) api.use(router);
   api.use(auth);
@@ -84,7 +93,7 @@ function securityHeaders(req, res, next) {
       "media-src 'self' https:",
       "style-src 'self' 'unsafe-inline'",
       "script-src 'self'",
-      "frame-src 'self' blob: data: https://www.youtube-nocookie.com https://www.youtube.com https://player.vimeo.com",
+      "frame-src 'self' https://www.youtube-nocookie.com https://www.youtube.com https://player.vimeo.com",
       "object-src 'none'",
       "base-uri 'self'",
       "form-action 'self'",

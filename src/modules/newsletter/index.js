@@ -55,7 +55,9 @@ const settings = {
 /** Erstellt einen Kampagnenentwurf aus einem Blogbeitrag. */
 function campaignFromPost(ctx, post, userId) {
   const url = ctx.posts.publicUrl(post);
-  const cover = post.cover_url ? `<p><img src="${escapeHtml(post.cover_url)}" alt="" style="max-width:100%;height:auto;border-radius:6px;"></p>\n` : '';
+  // E-Mails brauchen absolute Bild-URLs
+  const coverUrl = post.cover_url && !/^https?:\/\//i.test(post.cover_url) ? ctx.site.url(post.cover_url) : post.cover_url;
+  const cover = coverUrl ? `<p><img src="${escapeHtml(coverUrl)}" alt="" style="max-width:100%;height:auto;border-radius:6px;"></p>\n` : '';
   const html = `${cover}<h1>${escapeHtml(post.title)}</h1>
 <p>${escapeHtml(post.excerpt || '')}</p>
 <p><a href="${escapeHtml(url)}" style="display:inline-block;background:#2a78d6;color:#ffffff;padding:12px 22px;border-radius:6px;text-decoration:none;font-weight:bold;">Weiterlesen</a></p>`;

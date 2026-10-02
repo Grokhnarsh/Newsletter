@@ -32,7 +32,9 @@ npm install
 npm start
 ```
 
-Dann <http://localhost:3000/admin/> öffnen und das erste Administratorkonto anlegen. Bei der Einrichtung
+Dann <http://localhost:3000/admin/> öffnen und das erste Administratorkonto anlegen. Dafür wird der
+**Einrichtungscode** benötigt, den der Server beim Start ins Log schreibt (bei Docker: `docker compose logs`),
+damit niemand anderes eine frisch gestartete Instanz übernehmen kann. Bei der Einrichtung
 werden Startinhalte erzeugt: eine Startseite, „Über uns“, Entwürfe für Impressum und Datenschutz, ein erster
 Blogbeitrag, Menüs, eine Newsletter-Liste und eine E-Mail-Vorlage.
 Die Website ist unter <http://localhost:3000/> erreichbar.
@@ -63,13 +65,14 @@ Datenbank, Uploads und Outbox liegen im Volume `newsletter-data` (`/data`).
 | `UPLOADS_DIR` | `./data/uploads` | Ablage der Medienbibliothek (öffentlich unter `/uploads/`) |
 | `MODULES_DIR` | `./modules` | Ordner mit eigenen Modulen |
 | `THEME` | `default` | Theme-Ordner in `themes/` oder `src/themes/` |
-| `TRUST_PROXY` | `false` | Hinter Reverse Proxy auf `true` setzen |
+| `TRUST_PROXY` | `false` | Hinter Reverse Proxy auf `true` setzen – dann darf der Port **nur** für den Proxy erreichbar sein, sonst lässt sich die Absender-IP fälschen |
 | `MAIL_TRANSPORT` | `smtp` falls SMTP gesetzt, sonst `file` | `smtp`, `file` oder `log` |
 | `SMTP_URL` bzw. `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS` | – | SMTP-Zugang |
 | `MAIL_OUTBOX_DIR` | `./data/outbox` | Zielordner für `MAIL_TRANSPORT=file` |
 | `WORKER_ENABLED`, `WORKER_INTERVAL_MS`, `MAIL_MAX_ATTEMPTS` | `true`, `5000`, `3` | Newsletter-Versand-Worker |
 | `SESSION_TTL_HOURS` | `168` | Gültigkeit einer Admin-Sitzung |
 | `ADMIN_EMAIL`, `ADMIN_PASSWORD` | – | Legt beim ersten Start automatisch einen Administrator an |
+| `SETUP_TOKEN` | zufällig | Fester Einrichtungscode für das erste Administratorkonto (sonst steht ein zufälliger im Log) |
 
 Alles Weitere (Website-Name, Startseite, Farben, Logo, Absender, Versandrate, Texte …) wird in der
 Admin-Oberfläche unter *Einstellungen* gepflegt.
@@ -222,7 +225,7 @@ API-Schlüssel haben Redakteursrechte. Fehler: `{"error": "…", "details": {…
 | Blog | `GET/POST /api/posts` (`q`, `status=draft\|published\|scheduled`, `category_id`) · `GET/PUT/DELETE /api/posts/:id` · `POST /api/posts/preview` · Revisionen wie bei Seiten · `GET/POST/PUT/DELETE /api/categories…` |
 | Medien | `GET /api/media` (`q`, `type=image\|document`) · `POST /api/media` (Rohdaten, Header `X-Filename`) · `GET/PUT/DELETE /api/media/:id` |
 | Menüs | `GET /api/menus` · `PUT /api/menus/:location` (`{ items: [...] }`) |
-| Newsletter | `/api/subscribers…` (inkl. `import`, `export`, `bulk`) · `/api/lists…` · `/api/templates…` · `/api/campaigns…` (inkl. `test`, `send`, `schedule`, `pause`, `resume`, `cancel`, `report`, `recipients`) · `POST /api/campaigns/from-post/:postId` · `GET /api/stats/overview` · `POST /api/webhooks/bounce` · öffentlich: `POST /api/public/subscribe`, `GET /api/public/lists` |
+| Newsletter | `/api/subscribers…` (inkl. `import`, `export`, `bulk`) · `/api/lists…` · `/api/templates…` · `/api/campaigns…` (inkl. `test`, `send`, `schedule`, `pause`, `resume`, `cancel`, `report`, `recipients`) · `POST /api/campaigns/from-post/:postId` · `GET /api/stats/overview` · `POST /api/webhooks/bounce` · öffentlich: `POST /api/public/subscribe` (Pflichtfeld `consent: true`), `GET /api/public/lists` |
 
 **Öffentliche Website**: `/` (Startseite), `/<seitenpfad>`, `/blog`, `/blog/<slug>`, `/blog/kategorie/<slug>`,
 `/blog/feed.xml`, `/suche`, `/sitemap.xml`, `/robots.txt`, `/uploads/…`, `/subscribe`, `/confirm/:token`,
@@ -235,6 +238,12 @@ API-Schlüssel haben Redakteursrechte. Fehler: `{"error": "…", "details": {…
 - Uploads werden anhand ihrer Dateisignatur geprüft (kein SVG/HTML) und mit `nosniff` und Sandbox-CSP ausgeliefert.
 - Passwörter mit scrypt, Sitzungen und API-Schlüssel nur gehasht gespeichert, Ratenbegrenzung für Anmeldung und Formulare.
 - Seiten-Slugs können keine System- oder Modulpfade überdecken.
+- Anmeldungen brauchen eine ausdrückliche Einwilligung; Bestätigungs-Mails gehen höchstens einmal pro Tag an dieselbe
+  Adresse, und abgemeldete Adressen werden nur nach erneuter Bestätigung wieder aktiv. Die Bestätigung erfolgt per
+  Knopf (POST), damit Link-Scanner in Mailprogrammen sie nicht auslösen.
+- Datenauskunft und Löschung über die Einstellungsseite erfordern einen befristeten Link, der an die Adresse des
+  Abonnenten geschickt wird – ein weitergeleiteter Newsletter reicht dafür nicht.
+- Login-Sperre nach wiederholten Fehlversuchen pro IP und pro Konto; API-Schlüssel werden mit ihrem Benutzer gelöscht.
 
 ## Entwicklung
 
@@ -246,6 +255,7 @@ npm test       # Tests ausführen
 ## Produktivbetrieb
 
 - `BASE_URL` auf die öffentliche HTTPS-Adresse setzen und hinter einem Reverse Proxy mit TLS betreiben (`TRUST_PROXY=true`).
+  Den Port 3000 dann nicht öffentlich freigeben (z. B. in `docker-compose.yml` als `127.0.0.1:3000:3000`).
 - Für die Absender-Domain SPF, DKIM und DMARC einrichten.
 - `data/` (Datenbank und Uploads) regelmäßig sichern.
 - Das System ist für **eine** Instanz ausgelegt (Versand-Worker und Ratenbegrenzung laufen im Prozess).

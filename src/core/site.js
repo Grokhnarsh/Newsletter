@@ -3,6 +3,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import express, { Router } from 'express';
 import { escapeHtml } from '../lib/render.js';
+import { SAFE_URL } from '../lib/validate.js';
 
 /**
  * Öffentliche Website: lädt das Theme und rendert Ansichten in dessen Layout.
@@ -179,10 +180,10 @@ export const SITE_SETTINGS = {
     site_tagline: { type: 'string', max: 300 },
     site_description: { type: 'string', max: 500 },
     company_address: { type: 'string', max: 2000 },
-    privacy_url: { type: 'string', max: 500 },
-    imprint_url: { type: 'string', max: 500 },
+    privacy_url: { type: 'string', max: 500, ...SAFE_URL },
+    imprint_url: { type: 'string', max: 500, ...SAFE_URL },
     theme_accent_color: { type: 'string', max: 7, pattern: /^#[0-9a-fA-F]{6}$/, patternMessage: 'Farbe im Format #RRGGBB' },
-    theme_logo_url: { type: 'string', max: 500 },
+    theme_logo_url: { type: 'string', max: 500, ...SAFE_URL },
     theme_footer_text: { type: 'string', max: 1000 },
   },
 };

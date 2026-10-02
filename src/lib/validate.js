@@ -3,6 +3,9 @@ import { badRequest } from './errors.js';
 // Pragmatische Prüfung: ein @, keine Leerzeichen, Domain mit Punkt.
 const EMAIL_RE = /^[^\s@<>()[\]\\,;:"]+@[^\s@<>()[\]\\,;:"]+\.[^\s@<>()[\]\\,;:"]{2,}$/;
 
+/** Erlaubt nur http(s)-Adressen und Pfade auf der eigenen Website (kein javascript: o. Ä.). */
+export const SAFE_URL = { pattern: /^(https?:\/\/[^\s]+|\/(?!\/)[^\s]*)$/i, patternMessage: 'Nur http(s)-Adressen oder Pfade wie /seite' };
+
 export function isEmail(value) {
   return typeof value === 'string' && value.length <= 254 && EMAIL_RE.test(value);
 }

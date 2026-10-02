@@ -85,6 +85,21 @@ const SHORTCODE_RE = /(<p>\s*)?\[([a-z][a-z0-9_]*)((?:\s+[a-z_]+=(?:"[^"]*"|'[^'
 const ATTR_RE = /([a-z_]+)=(?:"([^"]*)"|'([^']*)'|([^\s\]]+))/gi;
 
 /**
+ * true, wenn `pos` im normalen Text steht – nicht innerhalb eines Tags (z. B. in einem
+ * Attributwert) und nicht in <code>/<pre>, wo Shortcodes als Beispiel stehen können.
+ */
+function isTextPosition(html, pos) {
+  const before = html.slice(0, pos);
+  if (before.lastIndexOf('<') > before.lastIndexOf('>')) return false;
+  for (const tag of ['code', 'pre']) {
+    const opened = (before.match(new RegExp(`<${tag}\\b`, 'gi')) || []).length;
+    const closed = (before.match(new RegExp(`</${tag}\\s*>`, 'gi')) || []).length;
+    if (opened > closed) return false;
+  }
+  return true;
+}
+
+/**
  * Shortcodes wie `[newsletter_form]` oder `[recent_posts limit="3"]`, die Module
  * registrieren. Die Ausgabe eines Shortcodes gilt als vertrauenswürdiges HTML.
  */
@@ -108,9 +123,11 @@ export class ContentService {
 
   /** Wandelt gespeichertes (bereits bereinigtes) HTML in die Ausgabe für die Website um. */
   render(html, req, depth = 0) {
-    return String(html ?? '').replace(SHORTCODE_RE, (match, pOpen, name, rawAttrs, pClose) => {
+    const source = String(html ?? '');
+    return source.replace(SHORTCODE_RE, (match, pOpen, name, rawAttrs, pClose, offset) => {
       const sc = this.shortcodes.get(name.toLowerCase());
       if (!sc || depth > 2) return match;
+      if (!isTextPosition(source, offset + (pOpen?.length || 0))) return match;
       // Shortcodes deaktivierter Module verschwinden aus der Ausgabe
       if (!this.isEnabled(sc.module)) return pOpen && pClose ? '' : (pOpen || '') + (pClose || '');
       const attrs = {};

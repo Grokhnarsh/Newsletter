@@ -56,6 +56,8 @@ export function loadConfig(overrides = {}) {
       maxAttempts: int(env.MAIL_MAX_ATTEMPTS, 3),
     },
     sessionTtlHours: int(env.SESSION_TTL_HOURS, 24 * 7),
+    // Einrichtungscode für das erste Administratorkonto (sonst zufällig, steht im Server-Log)
+    setupToken: env.SETUP_TOKEN || '',
     initialAdmin: {
       email: env.ADMIN_EMAIL || '',
       password: env.ADMIN_PASSWORD || '',
