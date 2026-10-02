@@ -15,6 +15,10 @@ if (config.initialAdmin.email && config.initialAdmin.password && ctx.users.count
   console.log(`Administrator ${config.initialAdmin.email} angelegt.`);
 }
 
+if (ctx.users.count() === 0) {
+  console.log(`Einrichtungscode für das erste Administratorkonto: ${ctx.setupToken}`);
+}
+
 const server = app.listen(config.port, config.host, () => {
   console.log(`CMS läuft auf ${config.baseUrl}`);
   console.log(`Admin-Oberfläche: ${config.baseUrl}/admin/`);

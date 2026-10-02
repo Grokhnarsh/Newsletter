@@ -1,10 +1,13 @@
+import crypto from 'node:crypto';
 import express, { Router } from 'express';
 import { HttpError } from '../../../lib/errors.js';
-import { rateLimit } from '../../../lib/rateLimit.js';
+import { FixedWindowCounter, rateLimit } from '../../../lib/rateLimit.js';
+import { randomToken } from '../../../lib/security.js';
 import { escapeHtml, mergeTags } from '../../../lib/render.js';
 import { isEmail, normalizeEmail } from '../../../lib/validate.js';
 
 const PIXEL = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
+const PRIVACY_LINK_TTL_MS = 24 * 3600_000;
 const SUCCESS_MESSAGE = {
   confirm: 'Fast geschafft! Wir haben dir eine E-Mail geschickt. Bitte bestätige deine Anmeldung über den Link darin.',
   done: 'Vielen Dank! Deine Anmeldung war erfolgreich.',
@@ -59,6 +62,50 @@ export function publicRoutes({ subscribers, lists, settings, delivery, campaigns
     } catch {
       return null;
     }
+  };
+
+  // Signierte, befristete Links für Datenauskunft und Löschung. Der Abonnenten-Token allein
+  // (steht in jeder Mail und wird mit weitergeleiteten Newslettern geteilt) reicht dafür nicht.
+  const linkSecret = () => {
+    let secret = settings.getInternal('privacy_link_secret');
+    if (!secret) {
+      secret = randomToken(32);
+      settings.setInternal('privacy_link_secret', secret);
+    }
+    return secret;
+  };
+  const signature = (subscriber, action, exp) =>
+    crypto.createHmac('sha256', linkSecret()).update(`${action}:${subscriber.id}:${subscriber.token}:${exp}`).digest('base64url');
+  const privacyUrl = (subscriber, action) => {
+    const exp = Date.now() + PRIVACY_LINK_TTL_MS;
+    return site.url(`/preferences/${subscriber.token}/${action}?exp=${exp}&sig=${signature(subscriber, action, exp)}`);
+  };
+  const validSignature = (subscriber, action, query) => {
+    const exp = Number(query.exp);
+    if (!Number.isFinite(exp) || exp < Date.now() || typeof query.sig !== 'string') return false;
+    const expected = Buffer.from(signature(subscriber, action, exp));
+    const given = Buffer.from(query.sig);
+    return expected.length === given.length && crypto.timingSafeEqual(expected, given);
+  };
+  const privacyMailLimiter = rateLimit({ windowMs: 60 * 60_000, max: 10 });
+  const privacyMailsPerSubscriber = new FixedWindowCounter(60 * 60_000);
+  const sendPrivacyLink = async (res, subscriber, action) => {
+    if (privacyMailsPerSubscriber.hit(subscriber.id) <= 3) {
+      try {
+        await delivery.sendPrivacyLink(subscriber, action, privacyUrl(subscriber, action));
+      } catch (err) {
+        logger.error(`[privacy] E-Mail (${action}) konnte nicht gesendet werden:`, err.message);
+      }
+    }
+    html(
+      res,
+      200,
+      messagePage({
+        title: 'E-Mail unterwegs',
+        message: `Wir haben dir eine E-Mail an ${subscriber.email} geschickt. Bitte öffne den Link darin, um fortzufahren. Er ist 24 Stunden gültig.`,
+        tone: 'ok',
+      }),
+    );
   };
 
   // ---- Anmeldung ----
@@ -117,6 +164,9 @@ export function publicRoutes({ subscribers, lists, settings, delivery, campaigns
 
     const email = normalizeEmail(body.email);
     if (!isEmail(email)) return respond(400, 'Bitte gib eine gültige E-Mail-Adresse ein.', false);
+    if (!['1', 'true', 'on', 'yes', true, 1].includes(body.consent)) {
+      return respond(400, 'Bitte bestätige, dass du den Newsletter erhalten möchtest.', false);
+    }
 
     const publicIds = lists.list({ publicOnly: true }).map((l) => l.id);
     const requested = [].concat(body.list_ids ?? body.lists ?? []).map(Number).filter((id) => publicIds.includes(id));
@@ -164,7 +214,29 @@ export function publicRoutes({ subscribers, lists, settings, delivery, campaigns
 
   // ---- Bestätigung (Double-Opt-in) ----
 
-  router.get('/confirm/:token', async (req, res) => {
+  // GET bestätigt nicht selbst: Link-Scanner in Mailprogrammen rufen Links automatisch auf.
+  router.get('/confirm/:token', (req, res) => {
+    const subscriber = findSubscriber(req.params.token);
+    if (!subscriber) return notFoundPage(res);
+    if (subscriber.status === 'active') {
+      return html(res, 200, messagePage({ title: 'Anmeldung bestätigt', message: 'Vielen Dank! Du erhältst ab sofort unseren Newsletter.', tone: 'ok' }));
+    }
+    if (subscriber.status !== 'pending') {
+      return html(res, 410, messagePage({ title: 'Nicht möglich', message: 'Dieses Abonnement kann nicht mehr bestätigt werden. Bitte melde dich erneut an.', tone: 'err' }));
+    }
+    html(
+      res,
+      200,
+      page({
+        title: 'Anmeldung bestätigen',
+        body: `<h1>Anmeldung bestätigen</h1>
+<p>Möchtest du den Newsletter an <strong>${escapeHtml(subscriber.email)}</strong> erhalten?</p>
+<form method="post" action="/confirm/${escapeHtml(subscriber.token)}"><button type="submit">Ja, Anmeldung bestätigen</button></form>`,
+      }),
+    );
+  });
+
+  router.post('/confirm/:token', async (req, res) => {
     const subscriber = findSubscriber(req.params.token);
     if (!subscriber) return notFoundPage(res);
     if (subscriber.status === 'pending') {
@@ -288,27 +360,51 @@ ${active ? `<form method="post" action="/unsubscribe/${escapeHtml(subscriber.tok
   });
 
   router.get('/preferences/:token/export', (req, res) => {
-    if (!findSubscriber(req.params.token)) return notFoundPage(res);
-    res.set('Content-Disposition', 'attachment; filename="meine-daten.json"');
-    res.json(subscribers.exportPersonalData(req.params.token));
+    const subscriber = findSubscriber(req.params.token);
+    if (!subscriber) return notFoundPage(res);
+    if (validSignature(subscriber, 'export', req.query)) {
+      res.set('Content-Disposition', 'attachment; filename="meine-daten.json"');
+      return res.json(subscribers.exportPersonalData(req.params.token));
+    }
+    html(
+      res,
+      200,
+      page({
+        title: 'Meine Daten',
+        body: `<h1>Meine Daten herunterladen</h1>
+<p>Zum Schutz deiner Daten schicken wir dir einen Download-Link an <strong>${escapeHtml(subscriber.email)}</strong>.</p>
+<form method="post" action="/preferences/${escapeHtml(subscriber.token)}/export"><button type="submit">Link per E-Mail senden</button></form>
+<p class="muted" style="margin-top:18px"><a href="/preferences/${escapeHtml(subscriber.token)}">Zurück</a></p>`,
+      }),
+    );
   });
 
-  router.post('/preferences/:token/delete', form, (req, res) => {
+  router.post('/preferences/:token/export', privacyMailLimiter, (req, res) => {
+    const subscriber = findSubscriber(req.params.token);
+    if (!subscriber) return notFoundPage(res);
+    return sendPrivacyLink(res, subscriber, 'export');
+  });
+
+  const deleteForm = (subscriber, query = '') => `<h1>Alle Daten löschen?</h1>
+<p>Dadurch werden <strong>${escapeHtml(subscriber.email)}</strong> und alle zugehörigen Daten endgültig gelöscht. Das kann nicht rückgängig gemacht werden.</p>
+<form method="post" action="/preferences/${escapeHtml(subscriber.token)}/delete${escapeHtml(query)}"><input type="hidden" name="confirm" value="1"><button class="secondary" type="submit">Endgültig löschen</button></form>
+<p class="muted" style="margin-top:18px"><a href="/preferences/${escapeHtml(subscriber.token)}">Abbrechen</a></p>`;
+  const signedQuery = (query) => `?exp=${encodeURIComponent(String(query.exp))}&sig=${encodeURIComponent(String(query.sig))}`;
+
+  // Aufruf über den Link aus der Bestätigungs-Mail
+  router.get('/preferences/:token/delete', (req, res) => {
+    const subscriber = findSubscriber(req.params.token);
+    if (!subscriber || !validSignature(subscriber, 'delete', req.query)) return notFoundPage(res);
+    html(res, 200, page({ title: 'Daten löschen', body: deleteForm(subscriber, signedQuery(req.query)) }));
+  });
+
+  router.post('/preferences/:token/delete', privacyMailLimiter, form, async (req, res) => {
     const subscriber = findSubscriber(req.params.token);
     if (!subscriber) return notFoundPage(res);
     if (req.body?.confirm !== '1') {
-      return html(
-        res,
-        200,
-        page({
-          title: 'Daten löschen',
-            body: `<h1>Alle Daten löschen?</h1>
-<p>Dadurch werden <strong>${escapeHtml(subscriber.email)}</strong> und alle zugehörigen Daten endgültig gelöscht. Das kann nicht rückgängig gemacht werden.</p>
-<form method="post" action="/preferences/${escapeHtml(subscriber.token)}/delete"><input type="hidden" name="confirm" value="1"><button class="secondary" type="submit">Endgültig löschen</button></form>
-<p class="muted" style="margin-top:18px"><a href="/preferences/${escapeHtml(subscriber.token)}">Abbrechen</a></p>`,
-        }),
-      );
+      return html(res, 200, page({ title: 'Daten löschen', body: deleteForm(subscriber) }));
     }
+    if (!validSignature(subscriber, 'delete', req.query)) return sendPrivacyLink(res, subscriber, 'delete');
     subscribers.remove(subscriber.id);
     html(res, 200, messagePage({ title: 'Daten gelöscht', message: 'Alle zu deiner Adresse gespeicherten Daten wurden gelöscht.', tone: 'ok' }));
   });

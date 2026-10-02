@@ -137,6 +137,21 @@ export class DeliveryService {
     await this.sendSystemMail(subscriber, s.welcome_subject, s.welcome_html);
   }
 
+  /** Einmal-Link für Datenauskunft oder Löschung an die Adresse des Abonnenten. */
+  async sendPrivacyLink(subscriber, action, actionUrl) {
+    const texts = {
+      export: {
+        subject: 'Deine Daten bei {{site_name}}',
+        html: '<p>Hallo {{first_name | "zusammen"}},</p>\n<p>du hast eine Auskunft über deine gespeicherten Daten angefordert. Über diesen Link kannst du sie 24 Stunden lang herunterladen:</p>\n<p><a href="{{action_url}}">Meine Daten herunterladen</a></p>\n<p>Falls du das nicht warst, kannst du diese E-Mail ignorieren.</p>',
+      },
+      delete: {
+        subject: 'Löschung deiner Daten bei {{site_name}} bestätigen',
+        html: '<p>Hallo {{first_name | "zusammen"}},</p>\n<p>du möchtest alle bei uns gespeicherten Daten löschen. Bitte bestätige das innerhalb von 24 Stunden über diesen Link:</p>\n<p><a href="{{action_url}}">Löschung bestätigen</a></p>\n<p>Falls du das nicht warst, kannst du diese E-Mail ignorieren – es wird nichts gelöscht.</p>',
+      },
+    }[action];
+    await this.sendSystemMail(subscriber, texts.subject, texts.html, { action_url: actionUrl });
+  }
+
   async sendSettingsTest(to) {
     await this.mailer.send({
       from: this.fromHeader(),

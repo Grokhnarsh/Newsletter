@@ -136,13 +136,11 @@ function accountDialog() {
       <hr style="border:0;border-top:1px solid var(--border);margin:18px 0">
       <h3>Passwort ändern</h3>
       <div class="field"><label for="acc-cur">Aktuelles Passwort</label><input id="acc-cur" name="current_password" type="password" autocomplete="current-password"></div>
-      <div class="field"><label for="acc-new">Neues Passwort</label><input id="acc-new" name="new_password" type="password" minlength="10" autocomplete="new-password"><div class="help">Mindestens 10 Zeichen. Leer lassen, um es nicht zu ändern.</div></div>`,
+      <div class="field"><label for="acc-new">Neues Passwort</label><input id="acc-new" name="new_password" type="password" minlength="10" autocomplete="new-password"><div class="help">Mindestens 10 Zeichen. Leer lassen, um es nicht zu ändern. Zum Ändern der E-Mail-Adresse wird das aktuelle Passwort benötigt.</div></div>`,
     onSubmit: async (form) => {
       const data = formData(form);
-      if (!data.new_password) {
-        delete data.new_password;
-        delete data.current_password;
-      }
+      if (!data.new_password) delete data.new_password;
+      if (!data.current_password) delete data.current_password;
       session.user = await put('/auth/me', data);
       toast('Konto gespeichert');
       renderShell();
@@ -194,6 +192,7 @@ function showSetup() {
         <div class="field"><label for="name">Dein Name</label><input id="name" name="name" type="text" autocomplete="name"></div>
         <div class="field"><label for="email">E-Mail</label><input id="email" name="email" type="email" required autocomplete="username"></div>
         <div class="field"><label for="password">Passwort</label><input id="password" name="password" type="password" minlength="10" required autocomplete="new-password"><div class="help">Mindestens 10 Zeichen</div></div>
+        <div class="field"><label for="setup_token">Einrichtungscode</label><input id="setup_token" name="setup_token" type="text" required autocomplete="off" spellcheck="false"><div class="help">Steht beim Start im Server-Log (z. B. <code>docker compose logs</code>) oder wurde als <code>SETUP_TOKEN</code> gesetzt.</div></div>
         <button class="btn btn-primary" type="submit">Konto anlegen</button>
       </form>`,
     ),

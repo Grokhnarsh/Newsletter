@@ -3,6 +3,8 @@ import { randomToken } from '../../../lib/security.js';
 import { now } from '../../../lib/time.js';
 import { isEmail, normalizeEmail } from '../../../lib/validate.js';
 
+/** Mindestabstand zwischen zwei Bestätigungs-Mails an dieselbe Adresse (öffentliches Formular). */
+export const CONFIRMATION_COOLDOWN_MS = 24 * 3600_000;
 export const STATUSES = ['pending', 'active', 'unsubscribed', 'bounced', 'complained'];
 const SORTABLE = { email: 's.email', created_at: 's.created_at', status: 's.status', first_name: 's.first_name', last_name: 's.last_name' };
 const IMPORT_FIELDS = new Set(['email', 'e-mail', 'mail', 'first_name', 'firstname', 'vorname', 'last_name', 'lastname', 'nachname', 'name', 'status']);
@@ -315,9 +317,14 @@ export class SubscriberService {
 
       // Gesperrte Adressen (Bounce/Beschwerde) werden nicht verändert.
       if (existing.status === 'bounced' || existing.status === 'complained') return { subscriber: existing, action: 'none' };
+      // Aktive Abonnenten ändern ihre Listen über die Einstellungsseite – nicht Dritte über das Formular.
+      if (existing.status === 'active') return { subscriber: existing, action: 'none' };
+      // Höchstens eine Bestätigungs-Mail pro Zeitraum, sonst ließe sich eine Adresse mit Mails fluten.
+      if (existing.confirmation_sent_at && Date.now() - new Date(existing.confirmation_sent_at).getTime() < CONFIRMATION_COOLDOWN_MS) {
+        return { subscriber: existing, action: 'none' };
+      }
 
       this.addToLists(existing.id, list_ids);
-      if (existing.status === 'active') return { subscriber: existing, action: 'none' };
 
       this.db.run(
         `UPDATE subscribers SET first_name = CASE WHEN first_name = '' THEN ? ELSE first_name END,
@@ -329,7 +336,8 @@ export class SubscriberService {
         now(),
         existing.id,
       );
-      if (doubleOptIn) {
+      // Wer sich abgemeldet hat, wird nur nach eigener Bestätigung wieder aktiv.
+      if (doubleOptIn || existing.status === 'unsubscribed') {
         this.setStatus(existing.id, 'pending');
         return { subscriber: this.find(existing.id), action: 'confirm' };
       }

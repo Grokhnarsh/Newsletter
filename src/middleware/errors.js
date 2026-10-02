@@ -22,6 +22,10 @@ export function errorHandler(logger, site) {
     } else if (err.type === 'entity.too.large') {
       status = 413;
       body = { error: 'Anfrage zu groß' };
+    } else if (err instanceof URIError || (Number.isInteger(err.status) && err.status >= 400 && err.status < 500)) {
+      // z. B. ungültige Prozent-Kodierung in der URL – Fehler des Aufrufers, kein Serverfehler
+      status = Number.isInteger(err.status) ? err.status : 400;
+      body = { error: 'Ungültige Anfrage' };
     } else {
       logger.error(err);
     }

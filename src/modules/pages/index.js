@@ -5,7 +5,7 @@ import { excerpt, sanitizeContent, slugify } from '../../core/content.js';
 import { badRequest, conflict, notFound } from '../../lib/errors.js';
 import { escapeHtml } from '../../lib/render.js';
 import { now } from '../../lib/time.js';
-import { parseId, validate } from '../../lib/validate.js';
+import { parseId, SAFE_URL, validate } from '../../lib/validate.js';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -22,7 +22,7 @@ const pageSchema = {
   template: { type: 'enum', values: TEMPLATES },
   seo_title: { type: 'string', max: 200 },
   seo_description: { type: 'string', max: 400 },
-  cover_url: { type: 'string', max: 500 },
+  cover_url: { type: 'string', max: 500, ...SAFE_URL },
   position: { type: 'int', min: 0, max: 100000 },
 };
 
@@ -91,7 +91,12 @@ export class PageService {
 
   /** Sucht eine veröffentlichte Seite über ihren vollständigen Pfad. */
   findPublishedByPath(urlPath) {
-    const segments = urlPath.split('/').filter(Boolean).map((s) => decodeURIComponent(s).toLowerCase());
+    let segments;
+    try {
+      segments = urlPath.split('/').filter(Boolean).map((s) => decodeURIComponent(s).toLowerCase());
+    } catch {
+      return null; // ungültige Prozent-Kodierung → 404 statt 500
+    }
     if (!segments.length) return null;
     let parentId = null;
     let page = null;

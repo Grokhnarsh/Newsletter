@@ -5,7 +5,7 @@ import { excerpt, sanitizeContent, slugify } from '../../core/content.js';
 import { badRequest, conflict, notFound } from '../../lib/errors.js';
 import { escapeHtml } from '../../lib/render.js';
 import { now } from '../../lib/time.js';
-import { pagination, parseId, validate } from '../../lib/validate.js';
+import { pagination, parseId, SAFE_URL, validate } from '../../lib/validate.js';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const dateFmt = new Intl.DateTimeFormat('de-DE', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Europe/Berlin' });
@@ -15,7 +15,7 @@ const postSchema = {
   slug: { type: 'string', max: 120 },
   excerpt: { type: 'string', max: 1000 },
   content: { type: 'string', max: 2_000_000, trim: false },
-  cover_url: { type: 'string', max: 500 },
+  cover_url: { type: 'string', max: 500, ...SAFE_URL },
   status: { type: 'enum', values: ['draft', 'published'] },
   published_at: { type: 'date' },
   seo_title: { type: 'string', max: 200 },

@@ -56,7 +56,7 @@ export async function startTestServer({ uploadsDir, modulesDir = null } = {}) {
       token = t;
     },
     async setupAdmin() {
-      const res = await this.post('/api/auth/setup', { email: 'admin@example.com', password: 'sehrgeheim123', site_name: 'Test-News' });
+      const res = await this.post('/api/auth/setup', { email: 'admin@example.com', password: 'sehrgeheim123', site_name: 'Test-News', setup_token: services.setupToken });
       token = res.data.token;
       return res;
     },

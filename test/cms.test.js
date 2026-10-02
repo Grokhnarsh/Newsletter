@@ -269,6 +269,9 @@ describe('Blog', () => {
     assert.equal(campaign.status, 201);
     assert.equal(campaign.data.subject, 'Neue Funktion');
     assert.match(campaign.data.content_html, /http:\/\/test.local\/blog\/neue-funktion/);
+    await t.put(`/api/posts/${post.id}`, { cover_url: '/uploads/2026/01/titel.jpg' });
+    const withCover = await t.post(`/api/campaigns/from-post/${post.id}`);
+    assert.match(withCover.data.content_html, /src="http:\/\/test.local\/uploads\/2026\/01\/titel.jpg"/, 'absolute Bild-URL für E-Mails');
     assert.ok(campaign.data.list_ids.length);
 
     await t.put('/api/settings', { newsletter_auto_campaign: true });
@@ -364,6 +367,29 @@ describe('Menüs & Website', () => {
     assert.match(html, /--accent:#ff6600/);
     assert.match(html, /Musterstr\. 1<br>12345 Musterstadt/);
     assert.match(html, /href="\/impressum">Impressum/);
+    for (const bad of ['javascript:alert(1)', '//evil.example', 'data:text/html,x']) {
+      assert.equal((await t.put('/api/settings', { privacy_url: bad })).status, 400, bad);
+    }
+    assert.equal((await t.put('/api/settings', { privacy_url: 'https://example.com/datenschutz' })).status, 200);
+    assert.equal((await t.post('/api/pages', { title: 'X', cover_url: 'javascript:alert(1)' })).status, 400);
+  });
+
+  test('Shortcodes nur im Text, nicht in Attributen oder Code-Beispielen', async () => {
+    await t.post('/api/pages', {
+      title: 'Shortcode-Test',
+      status: 'published',
+      content: '<p><a href="/x" title="[newsletter_form]">Link</a></p><pre><code>[newsletter_form]</code></pre><p>[newsletter_form]</p>',
+    });
+    const html = (await t.get('/shortcode-test', { auth: false })).data;
+    assert.match(html, /title="\[newsletter_form\]"/);
+    assert.match(html, /<code>\[newsletter_form\]<\/code>/);
+    assert.equal(html.match(/class="newsletter-box"/g).length, 2, 'Textvorkommen und Fußzeilen-Widget');
+  });
+
+  test('Sicherheits-Header und ungültige URLs', async () => {
+    const res = await t.get('/', { auth: false });
+    assert.doesNotMatch(res.headers.get('content-security-policy'), /blob:|frame-src[^;]*data:/);
+    assert.equal((await t.get('/%E0%A4%A', { auth: false })).status, 400);
   });
 
   test('Systemseiten: 404, robots.txt, Suche, Newsletter-Seiten im Theme', async () => {

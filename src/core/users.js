@@ -63,7 +63,11 @@ export class UserService {
     const user = this.find(id);
     if (id === currentUserId) throw badRequest('Du kannst dich nicht selbst löschen');
     if (user.role === 'admin' && this.adminCount() <= 1) throw badRequest('Der letzte Administrator kann nicht gelöscht werden');
-    this.db.run('DELETE FROM users WHERE id = ?', id);
+    this.db.transaction(() => {
+      // API-Schlüssel gehören zum Konto und dürfen es nicht überleben.
+      this.db.run('DELETE FROM api_keys WHERE created_by = ?', id);
+      this.db.run('DELETE FROM users WHERE id = ?', id);
+    });
   }
 
   adminCount() {
@@ -78,9 +82,13 @@ export class UserService {
     return row;
   }
 
-  changeOwnPassword(id, currentPassword, newPassword) {
+  checkPassword(id, password) {
     const row = this.db.get('SELECT password_hash FROM users WHERE id = ?', id);
-    if (!row || !verifyPassword(currentPassword, row.password_hash)) throw badRequest('Aktuelles Passwort ist falsch');
+    if (!row || !verifyPassword(password, row.password_hash)) throw badRequest('Aktuelles Passwort ist falsch');
+  }
+
+  changeOwnPassword(id, currentPassword, newPassword) {
+    this.checkPassword(id, currentPassword);
     this.db.run('UPDATE users SET password_hash = ? WHERE id = ?', hashPassword(newPassword), id);
   }
 
