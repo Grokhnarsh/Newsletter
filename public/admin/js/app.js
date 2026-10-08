@@ -1,6 +1,6 @@
 import { get, post, put, session } from './api.js';
 import { dashboardView } from './dashboard.js';
-import { ICONS, cms, registry } from './registry.js';
+import { ICONS, cms, registry, resetRegistry } from './registry.js';
 import { settingsView } from './settings.js';
 import { ctx } from './state.js';
 import { $, $$, formData, html, modal, raw, setHtml, toast, toastError } from './ui.js';
@@ -8,11 +8,12 @@ import { $, $$, formData, html, modal, raw, setHtml, toast, toastError } from '.
 const icon = (name) => raw(`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ICONS.modules}</svg>`);
 const LOGO = raw('<svg width="28" height="28" viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="6" fill="#2a78d6"/><path d="M6 7h12M6 12h12M6 17h7" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round"/></svg>');
 const GROUP_ORDER = ['Übersicht', 'Inhalte', 'Newsletter', 'System'];
+const ROLE_LABELS = { admin: 'Administrator', editor: 'Redakteur', author: 'Autor' };
 
 // Kernansichten; Module ergänzen weitere über die Registry
 const CORE_ROUTES = [
   [/^\/$/, dashboardView],
-  [/^\/settings(?:\/([a-z0-9-]+))?$/, settingsView],
+  [/^\/settings(?:\/([a-z0-9-]+))?$/, (el, tab) => (ctx.isAuthor ? setHtml(el, html`<div class="card"><p>Einstellungen verwaltet die Redaktion.</p></div>`) : settingsView(el, tab))],
 ];
 let modulesLoaded = false;
 
@@ -21,9 +22,10 @@ async function loadModules() {
   if (modulesLoaded) return;
   registry.modules = await get('/system/modules');
   cms.nav({ href: '#/', label: 'Dashboard', icon: 'dashboard', group: 'Übersicht', order: 0 });
-  cms.nav({ href: '#/settings', label: 'Einstellungen', icon: 'settings', group: 'System', order: 90 });
+  // Autoren sehen nur Module, die für sie freigegeben sind, und keine Einstellungen
+  if (!ctx.isAuthor) cms.nav({ href: '#/settings', label: 'Einstellungen', icon: 'settings', group: 'System', order: 90 });
   for (const mod of registry.modules) {
-    if (!mod.enabled || !mod.admin_entry) continue;
+    if (!mod.enabled || !mod.admin_entry || (ctx.isAuthor && !mod.authors)) continue;
     try {
       const entry = await import(mod.admin_entry);
       entry.default?.(cms);
@@ -61,7 +63,7 @@ function renderShell() {
         <div class="spacer"></div>
         <div class="userbox">
           <div class="name">${session.user.name || session.user.email}</div>
-          <div class="muted">${session.user.role === 'admin' ? 'Administrator' : 'Redakteur'}</div>
+          <div class="muted">${ROLE_LABELS[session.user.role] || session.user.role}</div>
           <div class="actions">
             <a class="small" href="/" target="_blank" rel="noopener">Website ansehen ↗</a>
             <button class="linklike small" id="account-btn">Mein Konto</button>
@@ -123,6 +125,9 @@ async function logout() {
     /* ignorieren */
   }
   session.user = null;
+  // Beim nächsten Login (evtl. mit anderer Rolle) Navigation neu aufbauen
+  resetRegistry();
+  modulesLoaded = false;
   showLogin();
 }
 
@@ -393,6 +398,9 @@ window.addEventListener('hashchange', () => {
 window.addEventListener('auth:expired', () => {
   if (session.user) toast('Sitzung abgelaufen – bitte erneut anmelden', 'error');
   session.user = null;
+  // Beim nächsten Login (evtl. mit anderer Rolle) Navigation neu aufbauen
+  resetRegistry();
+  modulesLoaded = false;
   showLogin();
 });
 // Markenname nach Änderung der Einstellungen aktualisieren

@@ -1,5 +1,6 @@
 // Admin-Oberfläche des Medien-Moduls
 import { ApiError, CSRF_HEADERS, del, get, post, put } from '/admin/js/api.js';
+import { ctx } from '/admin/js/state.js';
 import { $, confirmDialog, debounce, fmtDateTime, fmtNum, html, modal, pager, setHtml, toast, toastError } from '/admin/js/ui.js';
 
 const ACCEPT = 'image/jpeg,image/png,image/gif,image/webp,application/pdf,video/mp4,audio/mpeg';
@@ -120,7 +121,7 @@ async function mediaView(el) {
   setHtml(
     el,
     html`<div class="page-head"><div><h1>Medien</h1><div class="sub">Bilder und Dateien für Seiten, Beiträge und Newsletter</div></div>
-        <div class="toolbar"><button class="btn" id="optimize" title="WebP-Varianten für ältere Bilder erzeugen">Bilder optimieren</button></div></div>
+        <div class="toolbar">${ctx.isAuthor ? '' : html`<button class="btn" id="optimize" title="WebP-Varianten für ältere Bilder erzeugen">Bilder optimieren</button>`}</div></div>
       <div class="card">
         ${dropzoneHtml}
         <div class="toolbar" style="margin-bottom:12px">
@@ -150,7 +151,7 @@ async function mediaView(el) {
     const item = e.target.closest('[data-id]');
     if (item) detailDialog(items.find((m) => m.id === Number(item.dataset.id)), load);
   });
-  $('#optimize', el).addEventListener('click', async (e) => {
+  $('#optimize', el)?.addEventListener('click', async (e) => {
     e.target.disabled = true;
     try {
       const r = await post('/media/optimize');

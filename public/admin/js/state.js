@@ -8,6 +8,10 @@ export const ctx = {
   get isAdmin() {
     return session.user?.role === 'admin';
   },
+  /** Autoren: nur eigene Entwürfe, Veröffentlichung über den Freigabe-Workflow. */
+  get isAuthor() {
+    return session.user?.role === 'author';
+  },
   settings: null,
   lists: null,
   /** Listen werden in vielen Ansichten gebraucht – kurz zwischenspeichern. */

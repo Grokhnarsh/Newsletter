@@ -1,8 +1,10 @@
 // Admin-Oberfläche des Seiten-Moduls
 import { del, get, post, put } from '/admin/js/api.js';
-import { bindCover, bindRevisions, coverField, openPreview, revisionsCard, seoCard, slugify, statusBadge } from '/admin/js/content-ui.js';
+import {
+  bindCover, bindReview, bindRevisions, coverField, makeReadOnly, openPreview, reviewNotice, revisionsCard, seoCard, slugify, statusBadge, statusField, submitButton,
+} from '/admin/js/content-ui.js';
 import { richEditor } from '/admin/js/editor.js';
-import { navigate } from '/admin/js/state.js';
+import { ctx, navigate } from '/admin/js/state.js';
 import { $, confirmDialog, fmtDateTime, fmtNum, formData, html, raw, setHtml, toast, toastError, setText } from '/admin/js/ui.js';
 
 const TEMPLATES = { default: 'Standard', full: 'Volle Breite', landing: 'Landingpage (ohne Titel)' };
@@ -15,6 +17,9 @@ async function pagesView(el) {
         <div><h1>Seiten</h1><div class="sub">Statische Inhalte deiner Website, hierarchisch organisiert</div></div>
         <div class="toolbar"><a class="btn btn-primary" href="#/pages/new">+ Neue Seite</a></div>
       </div>
+      ${!ctx.isAuthor && pages.some((p) => p.status === 'draft' && p.review_requested_at)
+        ? html`<div class="callout warn">${pages.filter((p) => p.status === 'draft' && p.review_requested_at).length} Seite(n) warten auf deine Prüfung.</div>`
+        : ''}
       <div class="card"><div class="table-wrap"><table>
         <thead><tr><th>Titel</th><th>Adresse</th><th>Status</th><th>Geändert</th><th></th></tr></thead>
         <tbody>${
@@ -23,11 +28,11 @@ async function pagesView(el) {
                 (p) => html`<tr class="clickable" data-id="${p.id}">
                   <td><span class="tree-indent">${'— '.repeat(p.depth)}</span><strong>${p.title}</strong> ${p.is_home ? html`<span class="badge badge-info">Startseite</span>` : ''}</td>
                   <td class="small"><code>${p.is_home ? '/' : p.path}</code></td>
-                  <td>${statusBadge(p.status)}</td>
+                  <td>${statusBadge(p.status, false, Boolean(p.review_requested_at))}</td>
                   <td class="small nowrap">${fmtDateTime(p.updated_at)}<div class="muted">${p.author || ''}</div></td>
                   <td class="right nowrap">
                     ${p.status === 'published' ? html`<a class="btn btn-sm" href="${p.is_home ? '/' : p.path}" target="_blank" rel="noopener">Ansehen ↗</a>` : ''}
-                    <button class="btn btn-sm btn-ghost" data-del="${p.id}" aria-label="Löschen">🗑</button>
+                    ${p.can_edit ? html`<button class="btn btn-sm btn-ghost" data-del="${p.id}" aria-label="Löschen">🗑</button>` : ''}
                   </td>
                 </tr>`,
               )
@@ -76,13 +81,15 @@ async function pageEditorView(el, id) {
     el,
     html`<div class="page-head">
         <div><a href="#/pages" class="small">‹ Seiten</a><h1>${isNew ? 'Neue Seite' : page.title}</h1>
-          <div class="sub">${statusBadge(page.status)} ${page.is_home ? html`<span class="badge badge-info">Startseite</span>` : ''} <span id="dirty" class="muted small"></span></div></div>
+          <div class="sub">${statusBadge(page.status, false, Boolean(page.review_requested_at))} ${page.is_home ? html`<span class="badge badge-info">Startseite</span>` : ''} <span id="dirty" class="muted small"></span></div></div>
         <div class="toolbar">
           <button class="btn" id="preview">Vorschau</button>
           ${!isNew && page.status === 'published' ? html`<a class="btn" href="${page.is_home ? '/' : page.path}" target="_blank" rel="noopener">Ansehen ↗</a>` : ''}
+          ${submitButton(page, isNew)}
           <button class="btn btn-primary" id="save">Speichern</button>
         </div>
       </div>
+      ${reviewNotice(page, isNew)}
       <form id="page-form" class="content-editor" novalidate>
         <div class="stack">
           <div class="card">
@@ -94,10 +101,7 @@ async function pageEditorView(el, id) {
         <div class="stack">
           <div class="card side-card">
             <h3>Veröffentlichung</h3>
-            <div class="field"><label for="p-status">Status</label><select id="p-status" name="status">
-              <option value="draft" ${page.status === 'draft' ? raw('selected') : ''}>Entwurf</option>
-              <option value="published" ${page.status === 'published' ? raw('selected') : ''}>Veröffentlicht</option>
-            </select></div>
+            ${statusField(page)}
             ${page.published_at ? html`<p class="muted small">Erstmals veröffentlicht: ${fmtDateTime(page.published_at)}</p>` : ''}
             ${!isNew ? html`<button type="button" class="btn btn-sm btn-ghost" id="delete" style="color:var(--danger)">Seite löschen</button>` : ''}
           </div>
@@ -154,18 +158,28 @@ async function pageEditorView(el, id) {
     };
   };
 
-  $('#save', el).addEventListener('click', async () => {
+  // Speichert und liefert die gespeicherte Seite (oder false bei Fehlern)
+  const save = async () => {
     const data = collect();
-    if (!data.title.trim()) return toastError(new Error('Bitte einen Titel angeben'));
+    if (!data.title.trim()) {
+      toastError(new Error('Bitte einen Titel angeben'));
+      return false;
+    }
     try {
       const saved = isNew ? await post('/pages', data) : await put(`/pages/${id}`, data);
       dirty = false;
-      toast('Seite gespeichert');
-      if (isNew) navigate(`#/pages/${saved.id}`);
-      else pageEditorView(el, id);
+      return saved;
     } catch (err) {
       toastError(err);
+      return false;
     }
+  };
+  $('#save', el)?.addEventListener('click', async () => {
+    const saved = await save();
+    if (!saved) return;
+    toast('Seite gespeichert');
+    if (isNew) navigate(`#/pages/${saved.id}`);
+    else pageEditorView(el, id);
   });
   $('#preview', el).addEventListener('click', () => openPreview('/pages/preview', collect()));
   $('#delete', el)?.addEventListener('click', async () => {
@@ -179,7 +193,11 @@ async function pageEditorView(el, id) {
       toastError(err);
     }
   });
-  if (!isNew) bindRevisions(el, `/pages/${id}`, () => pageEditorView(el, id));
+  if (!isNew) {
+    bindRevisions(el, `/pages/${id}`, () => pageEditorView(el, id));
+    bindReview(el, `/pages/${id}`, { save: () => (dirty ? save() : true), reload: () => pageEditorView(el, id) });
+    if (!page.can_edit) makeReadOnly(el, form, editor);
+  }
 
   const beforeUnload = (e) => {
     if (dirty) {
@@ -204,7 +222,7 @@ export default function register(cms) {
       setHtml(
         el,
         html`<div class="label">Seiten</div><div class="value">${fmtNum(p.total || 0)}</div>
-          <div class="hint">${fmtNum(p.drafts || 0)} Entwürfe · <a href="#/pages/new">Neue Seite</a></div>`,
+          <div class="hint">${fmtNum(p.drafts || 0)} Entwürfe${p.review && !ctx.isAuthor ? html` · <a href="#/pages"><strong>${fmtNum(p.review)} zur Prüfung</strong></a>` : ''} · <a href="#/pages/new">Neue Seite</a></div>`,
       );
     },
   });

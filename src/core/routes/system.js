@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { escapeHtml } from '../../lib/render.js';
 import { randomToken } from '../../lib/security.js';
 import { pagination, parseId, validate } from '../../lib/validate.js';
-import { requireAdmin } from '../../middleware/auth.js';
+import { isAuthor, requireAdmin } from '../../middleware/auth.js';
 import { ROLES } from '../users.js';
 
 /** Systemrouten des Kerns: Module, Benutzer, API-Schlüssel, Einstellungen. */
@@ -23,7 +23,9 @@ export function systemRoutes(ctx) {
 
   // Kennzahlen aller aktiven Module für das Dashboard
   router.get('/system/dashboard', (req, res) => {
-    res.json(Object.assign({}, ...hooks.collect('admin.dashboard', req)));
+    // Autoren sehen nur Kennzahlen der Module, die sie auch bedienen dürfen
+    const handlers = hooks.active('admin.dashboard').filter((h) => !isAuthor(req) || modules.get(h.module)?.authors);
+    res.json(Object.assign({}, ...handlers.map((h) => h.fn(req)).filter(Boolean)));
   });
 
   // ---- Benutzer ----
@@ -145,7 +147,10 @@ ${systemMail.button(url, 'Passwort festlegen')}
 
   // ---- Einstellungen (Kern + alle Module) ----
   router.get('/settings', (req, res) => {
-    res.json({ ...settings.all(), mail_transport: mailer.kind });
+    const all = settings.all();
+    // Geheimnisse (z. B. Webhook-Schlüssel) bleiben Autoren verborgen
+    if (isAuthor(req)) for (const key of Object.keys(all)) if (/secret|token|password|webhook/i.test(key)) delete all[key];
+    res.json({ ...all, mail_transport: mailer.kind });
   });
 
   router.put('/settings', requireAdmin, (req, res) => {

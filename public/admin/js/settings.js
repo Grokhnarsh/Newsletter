@@ -352,12 +352,14 @@ const EVENT_LABELS = {
   login: 'Anmeldung', login_failed: 'Fehlgeschlagene Anmeldung', login_2fa_failed: 'Falscher 2FA-Code', password_changed: 'Passwort geändert',
   password_reset_requested: 'Passwort-Reset angefordert', password_reset: 'Passwort zurückgesetzt', '2fa_enabled': '2FA aktiviert', '2fa_disabled': '2FA deaktiviert',
 };
+const SUB_ACTIONS = { submit: 'zur Prüfung eingereicht', decline: 'zur Überarbeitung zurückgegeben', send: 'versendet', optimize: 'optimiert' };
 function describeAudit(e) {
   if (EVENT_LABELS[e.action]) return { text: EVENT_LABELS[e.action], detail: e.target };
   const parts = e.target.split('/').filter(Boolean);
   const entity = ENTITY_LABELS[parts[0]] || parts[0] || '';
   const id = /^\d+$/.test(parts[1] || '') ? ` #${parts[1]}` : '';
   const sub = parts.slice(id ? 2 : 1).join('/');
+  if (e.action === 'POST' && SUB_ACTIONS[sub]) return { text: `${entity}${id} ${SUB_ACTIONS[sub]}`, detail: `${e.action} ${e.target}` };
   const verb = { POST: sub ? 'Aktion' : 'angelegt', PUT: 'geändert', DELETE: 'gelöscht', PATCH: 'geändert' }[e.action] || e.action;
   return { text: `${entity}${id} ${verb}${sub ? `: ${sub}` : ''}`, detail: `${e.action} ${e.target}` };
 }

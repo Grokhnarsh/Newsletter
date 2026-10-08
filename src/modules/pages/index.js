@@ -2,6 +2,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Router } from 'express';
 import { excerpt, sanitizeContent, slugify } from '../../core/content.js';
+import { REVIEW_COLUMNS_SQL } from '../../core/review.js';
 import { badRequest, conflict, notFound } from '../../lib/errors.js';
 import { escapeHtml } from '../../lib/render.js';
 import { now } from '../../lib/time.js';
@@ -37,7 +38,8 @@ export class PageService {
 
   all() {
     return this.db.all(
-      `SELECT p.id, p.title, p.slug, p.parent_id, p.status, p.template, p.position, p.updated_at, p.published_at, u.email AS author
+      `SELECT p.id, p.title, p.slug, p.parent_id, p.status, p.template, p.position, p.updated_at, p.published_at,
+         p.author_id, p.review_requested_at, u.email AS author
        FROM pages p LEFT JOIN users u ON u.id = p.author_id ORDER BY p.position, p.title`,
     );
   }
@@ -276,8 +278,10 @@ export default {
   name: 'pages',
   label: 'Seiten',
   description: 'Hierarchische Inhaltsseiten mit Revisionen, SEO-Feldern, Vorlagen und frei wählbarer Startseite.',
-  version: '1.0.0',
+  version: '1.1.0',
   adminDir: path.join(dir, 'admin'),
+  // Autoren dürfen eigene Entwürfe anlegen und zur Prüfung einreichen
+  authors: true,
   settings: {
     defaults: { home_page_id: null },
     rules: { home_page_id: { type: 'int', min: 1 } },
@@ -306,6 +310,7 @@ export default {
         CREATE INDEX idx_pages_parent_slug ON pages(parent_id, slug);
       `,
     },
+    { version: 2, sql: REVIEW_COLUMNS_SQL('pages') },
   ],
 
   setup(ctx) {
@@ -334,7 +339,11 @@ export default {
           .map((p) => ({ loc: ctx.site.url(p.path), lastmod: p.updated_at })),
       opts,
     );
-    hooks.on('admin.dashboard', () => ({ pages: ctx.db.get("SELECT COUNT(*) AS total, SUM(status = 'draft') AS drafts FROM pages") }), opts);
+    hooks.on(
+      'admin.dashboard',
+      () => ({ pages: ctx.db.get("SELECT COUNT(*) AS total, SUM(status = 'draft') AS drafts, SUM(status = 'draft' AND review_requested_at IS NOT NULL) AS review FROM pages") }),
+      opts,
+    );
     hooks.on(
       'settings.validate',
       (data) => {
@@ -385,11 +394,19 @@ export default {
   api(router, ctx) {
     const r = Router();
     const homeId = () => ctx.settings.get('home_page_id');
+    const review = { table: 'pages', kind: 'die Seite' };
+    const editable = (req) => {
+      const page = ctx.pages.find(parseId(req.params.id));
+      ctx.review.assertCanEdit(req, page);
+      return page;
+    };
 
-    r.get('/', (req, res) => res.json(ctx.pages.tree().map((p) => ({ ...p, is_home: p.id === homeId() }))));
+    r.get('/', (req, res) =>
+      res.json(ctx.pages.tree().map((p) => ({ ...p, is_home: p.id === homeId(), can_edit: ctx.review.canEdit(req, p) }))),
+    );
 
     r.post('/', (req, res) => {
-      const data = validate(req.body, pageSchema, { partial: true });
+      const data = ctx.review.restrict(req, validate(req.body, pageSchema, { partial: true }));
       if (!data.title) throw badRequest('Validierung fehlgeschlagen', { title: 'Pflichtfeld' });
       res.status(201).json(ctx.pages.create(data, req.user?.id));
     });
@@ -403,19 +420,36 @@ export default {
 
     r.get('/:id', (req, res) => {
       const id = parseId(req.params.id);
-      res.json({ ...ctx.pages.find(id), is_home: id === homeId(), revisions: ctx.content.revisions('page', id) });
+      const page = ctx.pages.find(id);
+      res.json({ ...page, is_home: id === homeId(), can_edit: ctx.review.canEdit(req, page), revisions: ctx.content.revisions('page', id) });
     });
 
-    r.put('/:id', (req, res) => {
-      const data = validate(req.body, pageSchema, { partial: true });
-      res.json(ctx.pages.update(parseId(req.params.id), data, req.user?.id));
+    r.put('/:id', async (req, res) => {
+      const before = editable(req);
+      const page = ctx.pages.update(before.id, ctx.review.restrict(req, validate(req.body, pageSchema, { partial: true })), req.user?.id);
+      if (page.status === 'published' && before.status !== 'published') {
+        await ctx.review.published(req, { ...review, item: before, url: ctx.site.url(page.path) });
+      }
+      res.json(ctx.pages.find(page.id));
     });
 
     r.delete('/:id', (req, res) => {
-      const id = parseId(req.params.id);
+      const { id } = editable(req);
       ctx.pages.remove(id);
       if (homeId() === id) ctx.settings.update({ home_page_id: null });
       res.status(204).end();
+    });
+
+    // Freigabe-Workflow
+    r.post('/:id/submit', async (req, res) => {
+      const page = ctx.pages.find(parseId(req.params.id));
+      const result = await ctx.review.submit(req, { ...review, item: page, editPath: `/pages/${page.id}` });
+      res.json({ ...ctx.pages.find(page.id), ...result });
+    });
+    r.post('/:id/decline', async (req, res) => {
+      const page = ctx.pages.find(parseId(req.params.id));
+      const result = await ctx.review.decline(req, { ...review, item: page, editPath: `/pages/${page.id}`, note: req.body?.note });
+      res.json({ ...ctx.pages.find(page.id), ...result });
     });
 
     r.get('/:id/revisions/:rid', (req, res) => {
@@ -423,7 +457,7 @@ export default {
     });
 
     r.post('/:id/revisions/:rid/restore', (req, res) => {
-      const id = parseId(req.params.id);
+      const { id } = editable(req);
       const rev = ctx.content.revision('page', id, parseId(req.params.rid));
       res.json(ctx.pages.update(id, { title: rev.title, content: rev.content }, req.user?.id));
     });

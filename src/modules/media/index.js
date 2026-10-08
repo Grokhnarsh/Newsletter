@@ -4,10 +4,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express, { Router } from 'express';
 import { slugify } from '../../core/content.js';
-import { badRequest, notFound } from '../../lib/errors.js';
+import { badRequest, forbidden, notFound } from '../../lib/errors.js';
 import { escapeHtml } from '../../lib/render.js';
 import { now } from '../../lib/time.js';
 import { pagination, parseId, validate } from '../../lib/validate.js';
+import { isAuthor, requireEditor } from '../../middleware/auth.js';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const MAX_SIZE = 20 * 1024 * 1024;
@@ -240,6 +241,8 @@ export default {
   description: 'Medienbibliothek für Bilder, PDFs, Audio und Video mit Upload und Auswahldialog.',
   version: '1.0.0',
   adminDir: path.join(dir, 'admin'),
+  // Autoren dürfen hochladen und eigene Dateien bearbeiten
+  authors: true,
   migrations: [
     {
       version: 1,
@@ -305,7 +308,7 @@ export default {
       res.status(201).json(await ctx.media.create(req.body, name, req.user?.id));
     });
     // Varianten für ältere Bilder nachträglich erzeugen
-    r.post('/optimize', async (req, res) => {
+    r.post('/optimize', requireEditor, async (req, res) => {
       const ids = ctx.db.all("SELECT id FROM media WHERE mime IN ('image/jpeg', 'image/png', 'image/webp') AND variants = '[]'").map((m) => m.id);
       let done = 0;
       for (const id of ids) {
@@ -318,12 +321,18 @@ export default {
       res.json({ checked: ids.length, optimized: done, available: Boolean(await loadSharp()) });
     });
     r.get('/:id', (req, res) => res.json(ctx.media.find(parseId(req.params.id))));
+    // Autoren ändern und löschen nur ihre eigenen Uploads
+    const own = (req) => {
+      const m = ctx.media.find(parseId(req.params.id));
+      if (isAuthor(req) && m.created_by !== req.user?.id) throw forbidden('Autoren können nur eigene Dateien ändern');
+      return m;
+    };
     r.put('/:id', (req, res) => {
       const data = validate(req.body, { alt: { type: 'string', max: 300 }, title: { type: 'string', max: 300 } }, { partial: true });
-      res.json(ctx.media.update(parseId(req.params.id), data));
+      res.json(ctx.media.update(own(req).id, data));
     });
     r.delete('/:id', (req, res) => {
-      ctx.media.remove(parseId(req.params.id));
+      ctx.media.remove(own(req).id);
       res.status(204).end();
     });
     router.use('/media', r);

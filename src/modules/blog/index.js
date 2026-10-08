@@ -2,10 +2,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Router } from 'express';
 import { excerpt, sanitizeContent, slugify } from '../../core/content.js';
+import { REVIEW_COLUMNS_SQL } from '../../core/review.js';
 import { badRequest, conflict, notFound } from '../../lib/errors.js';
 import { escapeHtml } from '../../lib/render.js';
 import { now } from '../../lib/time.js';
 import { pagination, parseId, SAFE_URL, validate } from '../../lib/validate.js';
+import { requireEditor } from '../../middleware/auth.js';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const dateFmt = new Intl.DateTimeFormat('de-DE', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Europe/Berlin' });
@@ -54,7 +56,7 @@ export class PostService {
   }
 
   /** Liste für die Verwaltung (alle Status). */
-  list({ q, status, category_id }, { page, perPage, offset }) {
+  list({ q, status, category_id, author_id }, { page, perPage, offset }) {
     const where = [];
     const params = [];
     if (q) {
@@ -64,9 +66,15 @@ export class PostService {
     if (status === 'scheduled') {
       where.push("p.status = 'published' AND p.published_at > ?");
       params.push(now());
+    } else if (status === 'review') {
+      where.push("p.status = 'draft' AND p.review_requested_at IS NOT NULL");
     } else if (status) {
       where.push('p.status = ?');
       params.push(status);
+    }
+    if (author_id) {
+      where.push('p.author_id = ?');
+      params.push(Number(author_id));
     }
     if (category_id) {
       where.push('EXISTS (SELECT 1 FROM post_categories pc WHERE pc.post_id = p.id AND pc.category_id = ?)');
@@ -76,7 +84,7 @@ export class PostService {
     const total = this.db.get(`SELECT COUNT(*) AS n FROM posts p ${sql}`, ...params).n;
     const items = this.db
       .all(
-        `SELECT p.id, p.title, p.slug, p.status, p.published_at, p.updated_at, p.cover_url, u.email AS author
+        `SELECT p.id, p.title, p.slug, p.status, p.published_at, p.updated_at, p.cover_url, p.author_id, p.review_requested_at, u.email AS author
          FROM posts p LEFT JOIN users u ON u.id = p.author_id ${sql}
          ORDER BY COALESCE(p.published_at, p.updated_at) DESC, p.id DESC LIMIT ? OFFSET ?`,
         ...params,
@@ -302,8 +310,10 @@ export default {
   name: 'blog',
   label: 'Blog',
   description: 'Beiträge mit Kategorien, geplanter Veröffentlichung, RSS-Feed und Newsletter-Anbindung.',
-  version: '1.0.0',
+  version: '1.1.0',
   adminDir: path.join(dir, 'admin'),
+  // Autoren dürfen eigene Entwürfe anlegen und zur Prüfung einreichen
+  authors: true,
   settings: {
     defaults: { blog_title: 'Blog', blog_intro: '', blog_posts_per_page: 9, blog_on_home: true },
     rules: {
@@ -346,6 +356,7 @@ export default {
         );
       `,
     },
+    { version: 2, sql: REVIEW_COLUMNS_SQL('posts') },
   ],
 
   setup(ctx) {
@@ -377,7 +388,7 @@ export default {
     );
     hooks.on(
       'admin.dashboard',
-      () => ({ blog: ctx.db.get("SELECT COUNT(*) AS total, SUM(status = 'draft') AS drafts, SUM(status = 'published' AND published_at > ?) AS scheduled FROM posts", now()) }),
+      () => ({ blog: ctx.db.get("SELECT COUNT(*) AS total, SUM(status = 'draft') AS drafts, SUM(status = 'published' AND published_at > ?) AS scheduled, SUM(status = 'draft' AND review_requested_at IS NOT NULL) AS review FROM posts", now()) }),
       opts,
     );
     hooks.on('menus.resolve', (item) => (item.type === 'blog' ? '/blog' : undefined), opts);
@@ -421,9 +432,19 @@ export default {
       }
     };
 
-    r.get('/', (req, res) => res.json(ctx.posts.list(req.query, pagination(req.query))));
+    const review = { table: 'posts', kind: 'den Beitrag' };
+    const editable = (req) => {
+      const post = ctx.posts.find(parseId(req.params.id));
+      ctx.review.assertCanEdit(req, post);
+      return post;
+    };
+
+    r.get('/', (req, res) => {
+      const list = ctx.posts.list(req.query, pagination(req.query));
+      res.json({ ...list, items: list.items.map((p) => ({ ...p, can_edit: ctx.review.canEdit(req, p) })) });
+    });
     r.post('/', (req, res) => {
-      const data = validate(req.body, postSchema, { partial: true });
+      const data = ctx.review.restrict(req, validate(req.body, postSchema, { partial: true }));
       if (!data.title) throw badRequest('Validierung fehlgeschlagen', { title: 'Pflichtfeld' });
       const post = ctx.posts.create(data, req.user?.id);
       publishEvent(null, post, req);
@@ -438,23 +459,36 @@ export default {
       res.type('html').send(ctx.site.render(req, { ...postView(ctx, req, post), noindex: true }));
     });
     r.get('/:id', (req, res) => {
-      const id = parseId(req.params.id);
-      res.json({ ...ctx.posts.find(id), url: ctx.posts.publicUrl(ctx.posts.find(id)), revisions: ctx.content.revisions('post', id) });
+      const post = ctx.posts.find(parseId(req.params.id));
+      res.json({ ...post, url: ctx.posts.publicUrl(post), can_edit: ctx.review.canEdit(req, post), revisions: ctx.content.revisions('post', post.id) });
     });
-    r.put('/:id', (req, res) => {
-      const id = parseId(req.params.id);
-      const before = ctx.posts.find(id);
-      const post = ctx.posts.update(id, validate(req.body, postSchema, { partial: true }), req.user?.id);
+    r.put('/:id', async (req, res) => {
+      const before = editable(req);
+      const post = ctx.posts.update(before.id, ctx.review.restrict(req, validate(req.body, postSchema, { partial: true })), req.user?.id);
       publishEvent(before, post, req);
-      res.json(post);
+      if (post.status === 'published' && before.status !== 'published') {
+        await ctx.review.published(req, { ...review, item: before, url: ctx.posts.publicUrl(post) });
+      }
+      res.json(ctx.posts.find(post.id));
     });
     r.delete('/:id', (req, res) => {
-      ctx.posts.remove(parseId(req.params.id));
+      ctx.posts.remove(editable(req).id);
       res.status(204).end();
+    });
+    // Freigabe-Workflow
+    r.post('/:id/submit', async (req, res) => {
+      const post = ctx.posts.find(parseId(req.params.id));
+      const result = await ctx.review.submit(req, { ...review, item: post, editPath: `/posts/${post.id}` });
+      res.json({ ...ctx.posts.find(post.id), ...result });
+    });
+    r.post('/:id/decline', async (req, res) => {
+      const post = ctx.posts.find(parseId(req.params.id));
+      const result = await ctx.review.decline(req, { ...review, item: post, editPath: `/posts/${post.id}`, note: req.body?.note });
+      res.json({ ...ctx.posts.find(post.id), ...result });
     });
     r.get('/:id/revisions/:rid', (req, res) => res.json(ctx.content.revision('post', parseId(req.params.id), parseId(req.params.rid))));
     r.post('/:id/revisions/:rid/restore', (req, res) => {
-      const id = parseId(req.params.id);
+      const { id } = editable(req);
       const rev = ctx.content.revision('post', id, parseId(req.params.rid));
       res.json(ctx.posts.update(id, { title: rev.title, content: rev.content }, req.user?.id));
     });
@@ -463,9 +497,9 @@ export default {
     const c = Router();
     const catSchema = { name: { type: 'string', required: true, max: 100 }, slug: { type: 'string', max: 100 }, description: { type: 'string', max: 1000 } };
     c.get('/', (req, res) => res.json(ctx.posts.categories()));
-    c.post('/', (req, res) => res.status(201).json(ctx.posts.saveCategory(null, validate(req.body, catSchema))));
-    c.put('/:id', (req, res) => res.json(ctx.posts.saveCategory(parseId(req.params.id), validate(req.body, catSchema))));
-    c.delete('/:id', (req, res) => {
+    c.post('/', requireEditor, (req, res) => res.status(201).json(ctx.posts.saveCategory(null, validate(req.body, catSchema))));
+    c.put('/:id', requireEditor, (req, res) => res.json(ctx.posts.saveCategory(parseId(req.params.id), validate(req.body, catSchema))));
+    c.delete('/:id', requireEditor, (req, res) => {
       ctx.posts.removeCategory(parseId(req.params.id));
       res.status(204).end();
     });

@@ -1,6 +1,8 @@
 // Admin-Oberfläche des Blog-Moduls
 import { del, get, post, put } from '/admin/js/api.js';
-import { bindCover, bindRevisions, coverField, openPreview, revisionsCard, seoCard, slugify, statusBadge } from '/admin/js/content-ui.js';
+import {
+  bindCover, bindReview, bindRevisions, coverField, makeReadOnly, openPreview, reviewNotice, revisionsCard, seoCard, slugify, statusBadge, statusField, submitButton,
+} from '/admin/js/content-ui.js';
 import { richEditor } from '/admin/js/editor.js';
 import { saveSettings } from '/admin/js/settings.js';
 import { ctx, navigate } from '/admin/js/state.js';
@@ -11,23 +13,25 @@ import {
 let cmsRef = null;
 
 async function postsView(el) {
-  const state = { q: '', status: '', category_id: '', page: 1 };
+  const params = new URLSearchParams(location.hash.split('?')[1] || '');
+  const state = { q: '', status: params.get('status') || '', category_id: '', page: 1 };
   const categories = await get('/categories');
   setHtml(
     el,
     html`<div class="page-head">
         <div><h1>Beiträge</h1><div class="sub">Blog-Artikel schreiben, planen und veröffentlichen</div></div>
-        <div class="toolbar"><a class="btn" href="#/categories">Kategorien</a><a class="btn btn-primary" href="#/posts/new">+ Neuer Beitrag</a></div>
+        <div class="toolbar">${ctx.isAuthor ? '' : html`<a class="btn" href="#/categories">Kategorien</a>`}<a class="btn btn-primary" href="#/posts/new">+ Neuer Beitrag</a></div>
       </div>
       <div class="card">
         <div class="toolbar" style="margin-bottom:12px">
           <input type="search" id="q" placeholder="Suchen …" style="max-width:260px" aria-label="Suche">
-          <select id="status" style="max-width:180px" aria-label="Status"><option value="">Alle</option><option value="published">Veröffentlicht</option><option value="scheduled">Geplant</option><option value="draft">Entwürfe</option></select>
+          <select id="status" style="max-width:180px" aria-label="Status"><option value="">Alle</option><option value="published">Veröffentlicht</option><option value="scheduled">Geplant</option><option value="draft">Entwürfe</option><option value="review">Zur Prüfung</option></select>
           <select id="cat" style="max-width:200px" aria-label="Kategorie"><option value="">Alle Kategorien</option>${categories.map((c) => html`<option value="${c.id}">${c.name}</option>`)}</select>
         </div>
         <div id="rows"></div>
       </div>`,
   );
+  $('#status', el).value = state.status;
   const load = async () => {
     const qs = new URLSearchParams({ page: state.page, per_page: 20 });
     for (const k of ['q', 'status', 'category_id']) if (state[k]) qs.set(k, state[k]);
@@ -43,7 +47,7 @@ async function postsView(el) {
                 (p) => html`<tr class="clickable" data-id="${p.id}">
                   <td><strong>${p.title}</strong><div class="muted small">/blog/${p.slug}</div></td>
                   <td>${p.categories.map((c) => html`<span class="chip">${c.name}</span>`)}</td>
-                  <td>${statusBadge(p.status, p.scheduled)}</td>
+                  <td>${statusBadge(p.status, p.scheduled, Boolean(p.review_requested_at))}</td>
                   <td class="small nowrap">${fmtDateTime(p.published_at || p.updated_at)}<div class="muted">${p.author || ''}</div></td>
                   <td class="right">${p.status === 'published' && !p.scheduled ? html`<a class="btn btn-sm" href="/blog/${p.slug}" target="_blank" rel="noopener">Ansehen ↗</a>` : ''}</td>
                 </tr>`,
@@ -85,13 +89,15 @@ async function postEditorView(el, id) {
     el,
     html`<div class="page-head">
         <div><a href="#/posts" class="small">‹ Beiträge</a><h1>${isNew ? 'Neuer Beitrag' : p.title}</h1>
-          <div class="sub">${statusBadge(p.status, scheduled)} <span id="dirty" class="muted small"></span></div></div>
+          <div class="sub">${statusBadge(p.status, scheduled, Boolean(p.review_requested_at))} <span id="dirty" class="muted small"></span></div></div>
         <div class="toolbar">
           <button class="btn" id="preview">Vorschau</button>
           ${!isNew && p.status === 'published' && !scheduled ? html`<a class="btn" href="/blog/${p.slug}" target="_blank" rel="noopener">Ansehen ↗</a>` : ''}
+          ${submitButton(p, isNew)}
           <button class="btn btn-primary" id="save">Speichern</button>
         </div>
       </div>
+      ${reviewNotice(p, isNew)}
       <form id="post-form" class="content-editor" novalidate>
         <div class="stack">
           <div class="card">
@@ -104,12 +110,13 @@ async function postEditorView(el, id) {
         <div class="stack">
           <div class="card side-card">
             <h3>Veröffentlichung</h3>
-            <div class="field"><label for="b-status">Status</label><select id="b-status" name="status">
-              <option value="draft" ${p.status === 'draft' ? raw('selected') : ''}>Entwurf</option>
-              <option value="published" ${p.status === 'published' ? raw('selected') : ''}>Veröffentlicht</option>
-            </select></div>
-            <div class="field"><label for="b-date">Veröffentlichungsdatum</label><input id="b-date" name="published_at" type="datetime-local" value="${p.published_at ? toLocalInput(p.published_at) : ''}">
-              <div class="help">Ein Datum in der Zukunft plant den Beitrag. Leer = beim Veröffentlichen.</div></div>
+            ${statusField(p)}
+            ${
+              ctx.isAuthor
+                ? ''
+                : html`<div class="field"><label for="b-date">Veröffentlichungsdatum</label><input id="b-date" name="published_at" type="datetime-local" value="${p.published_at ? toLocalInput(p.published_at) : ''}">
+              <div class="help">Ein Datum in der Zukunft plant den Beitrag. Leer = beim Veröffentlichen.</div></div>`
+            }
             ${!isNew ? html`<button type="button" class="btn btn-sm btn-ghost" id="delete" style="color:var(--danger)">Beitrag löschen</button>` : ''}
           </div>
           <div class="card side-card">
@@ -119,13 +126,13 @@ async function postEditorView(el, id) {
                 ? html`<div class="checks">${categories.map(
                     (c) => html`<label class="checkline"><input type="checkbox" name="category_ids" data-array value="${c.id}" ${p.category_ids.includes(c.id) ? raw('checked') : ''}> ${c.name}</label>`,
                   )}</div>`
-                : html`<p class="muted small">Noch keine Kategorien. <a href="#/categories">Anlegen</a></p>`
+                : html`<p class="muted small">Noch keine Kategorien.${ctx.isAuthor ? '' : html` <a href="#/categories">Anlegen</a>`}</p>`
             }
           </div>
           <div class="card side-card">${coverField(p.cover_url)}</div>
           ${seoCard(p)}
           ${
-            newsletter && !isNew
+            newsletter && !isNew && !ctx.isAuthor
               ? html`<div class="card side-card"><h3>Newsletter</h3><p class="muted small">Erstellt einen Kampagnenentwurf mit Teaser, Titelbild und Link zum Beitrag.</p>
                   <button type="button" class="btn btn-sm" id="to-newsletter">Als Newsletter-Entwurf anlegen</button></div>`
               : ''
@@ -157,22 +164,32 @@ async function postEditorView(el, id) {
       ...d,
       content: editor.getValue(),
       category_ids: (d.category_ids || []).map(Number),
-      published_at: d.published_at ? new Date(d.published_at).toISOString() : null,
+      ...(ctx.isAuthor ? {} : { published_at: d.published_at ? new Date(d.published_at).toISOString() : null }),
     };
   };
 
-  $('#save', el).addEventListener('click', async () => {
+  // Speichert und liefert den gespeicherten Beitrag (oder false bei Fehlern)
+  const save = async () => {
     const data = collect();
-    if (!data.title.trim()) return toastError(new Error('Bitte einen Titel angeben'));
+    if (!data.title.trim()) {
+      toastError(new Error('Bitte einen Titel angeben'));
+      return false;
+    }
     try {
       const saved = isNew ? await post('/posts', data) : await put(`/posts/${id}`, data);
       dirty = false;
-      toast('Beitrag gespeichert');
-      if (isNew) navigate(`#/posts/${saved.id}`);
-      else postEditorView(el, id);
+      return saved;
     } catch (err) {
       toastError(err);
+      return false;
     }
+  };
+  $('#save', el)?.addEventListener('click', async () => {
+    const saved = await save();
+    if (!saved) return;
+    toast('Beitrag gespeichert');
+    if (isNew) navigate(`#/posts/${saved.id}`);
+    else postEditorView(el, id);
   });
   $('#preview', el).addEventListener('click', () => {
     const d = collect();
@@ -195,7 +212,11 @@ async function postEditorView(el, id) {
       toastError(err);
     }
   });
-  if (!isNew) bindRevisions(el, `/posts/${id}`, () => postEditorView(el, id));
+  if (!isNew) {
+    bindRevisions(el, `/posts/${id}`, () => postEditorView(el, id));
+    bindReview(el, `/posts/${id}`, { save: () => (dirty ? save() : true), reload: () => postEditorView(el, id) });
+    if (!p.can_edit) makeReadOnly(el, form, editor);
+  }
 
   const beforeUnload = (e) => {
     if (dirty) {
@@ -286,7 +307,7 @@ export default function register(cms) {
   cms.nav({ href: '#/posts', label: 'Blog', icon: 'blog', group: 'Inhalte', order: 20 });
   cms.route(/^\/posts$/, postsView);
   cms.route(/^\/posts\/(new|\d+)$/, postEditorView);
-  cms.route(/^\/categories$/, categoriesView);
+  if (!ctx.isAuthor) cms.route(/^\/categories$/, categoriesView);
   cms.settingsTab({ id: 'blog', label: 'Blog', order: 30, render: blogSettingsTab });
   cms.widget({
     id: 'blog',
@@ -297,7 +318,7 @@ export default function register(cms) {
       setHtml(
         el,
         html`<div class="label">Blogbeiträge</div><div class="value">${fmtNum(b.total || 0)}</div>
-          <div class="hint">${fmtNum(b.drafts || 0)} Entwürfe · ${fmtNum(b.scheduled || 0)} geplant · <a href="#/posts/new">Neuer Beitrag</a></div>`,
+          <div class="hint">${fmtNum(b.drafts || 0)} Entwürfe · ${fmtNum(b.scheduled || 0)} geplant${b.review && !ctx.isAuthor ? html` · <a href="#/posts?status=review"><strong>${fmtNum(b.review)} zur Prüfung</strong></a>` : ''} · <a href="#/posts/new">Neuer Beitrag</a></div>`,
       );
     },
   });

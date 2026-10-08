@@ -6,6 +6,7 @@ import { CACHE_SETTINGS, PageCache } from './core/cache.js';
 import { ContentService } from './core/content.js';
 import { HookBus } from './core/hooks.js';
 import { MAIL_SETTINGS, SystemMail } from './core/mail.js';
+import { ReviewService } from './core/review.js';
 import { SearchService } from './core/search.js';
 import { ModuleManager } from './core/modules.js';
 import { authRoutes } from './core/routes/auth.js';
@@ -13,7 +14,8 @@ import { systemRoutes } from './core/routes/system.js';
 import { SettingsService } from './core/settings.js';
 import { SITE_SETTINGS, SiteService } from './core/site.js';
 import { UserService } from './core/users.js';
-import { authenticate, identify } from './middleware/auth.js';
+import { authenticate, identify, isAuthor } from './middleware/auth.js';
+import { forbidden } from './lib/errors.js';
 import { randomToken } from './lib/security.js';
 import { errorHandler, notFoundHandler } from './middleware/errors.js';
 import { builtinModules } from './modules/index.js';
@@ -49,7 +51,8 @@ export async function createCms({ db, config, mailer, logger = console, modules:
   const backups = new BackupService({ db, config, settings, modules: manager, logger });
   const search = new SearchService({ db, hooks });
   const cache = new PageCache(settings);
-  const ctx = { db, config, mailer, logger, settings, hooks, content, site, users, audit, systemMail, backups, search, cache, modules: manager };
+  const review = new ReviewService({ db, config, systemMail, logger });
+  const ctx = { db, config, mailer, logger, settings, hooks, content, site, users, audit, systemMail, backups, search, cache, review, modules: manager };
   site.search = search;
   // Einmaliger Einrichtungscode: ohne ihn kann niemand das erste Administratorkonto anlegen.
   ctx.setupToken = config.setupToken || randomToken(12);
@@ -92,6 +95,8 @@ export async function createCms({ db, config, mailer, logger = console, modules:
   api.use(auth);
   api.use(systemRoutes(ctx));
   for (const router of manager.mount('api', ctx)) api.use(router);
+  // Autoren werden an Modulen ohne Autorenzugang vorbeigeleitet → 403 statt 404
+  api.use((req, res, next) => next(isAuthor(req) ? forbidden('Diese Funktion ist der Redaktion vorbehalten') : undefined));
   api.use(notFoundHandler);
   app.use('/api', api);
 

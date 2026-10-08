@@ -243,6 +243,14 @@ export function richEditor(container, { value = '', onChange = () => {} } = {}) 
 
   return {
     getValue,
+    /** Nur lesen (z. B. fremde Inhalte für Autoren). */
+    setReadOnly() {
+      area.contentEditable = 'false';
+      source.readOnly = true;
+      container.querySelectorAll('.rte-toolbar button, .rte-toolbar select').forEach((c) => {
+        c.disabled = true;
+      });
+    },
     setValue(v) {
       if (sourceMode) source.value = v;
       else area.innerHTML = v;
