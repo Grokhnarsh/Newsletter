@@ -66,7 +66,7 @@ export class SiteService {
       bodyClass: view.bodyClass || '',
       isHome: Boolean(view.isHome),
       currentPath: pathName,
-      content: view.content || '',
+      content: this.hooks.filter('site.content', view.content || '', req),
       menus: { main: this.menu('main'), footer: this.menu('footer') },
       head: this.hooks.collect('site.head', req).join('\n'),
       widgets: {

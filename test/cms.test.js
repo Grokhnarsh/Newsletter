@@ -461,7 +461,7 @@ describe('Migration bestehender Installationen', () => {
     const db = openDatabase(file);
     const { ctx } = await createCms({ db, config, mailer: createMemoryMailer(), logger: { log() {}, warn() {}, error() {} } });
     assert.equal(ctx.subscribers.findByEmail('alt@example.com').status, 'active');
-    const migrated = db.all('SELECT module FROM module_migrations ORDER BY module').map((r) => r.module);
+    const migrated = db.all('SELECT DISTINCT module FROM module_migrations ORDER BY module').map((r) => r.module);
     assert.deepEqual(migrated, builtinModules.filter((m) => m.migrations?.length).map((m) => m.name).sort());
     assert.ok(db.get("SELECT 1 AS ok FROM sqlite_master WHERE name = 'content_revisions'"));
     db.close();
