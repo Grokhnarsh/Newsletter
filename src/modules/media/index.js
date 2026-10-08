@@ -4,12 +4,30 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express, { Router } from 'express';
 import { slugify } from '../../core/content.js';
-import { badRequest, notFound } from '../../lib/errors.js';
+import { badRequest, forbidden, notFound } from '../../lib/errors.js';
+import { escapeHtml } from '../../lib/render.js';
 import { now } from '../../lib/time.js';
 import { pagination, parseId, validate } from '../../lib/validate.js';
+import { isAuthor, requireEditor } from '../../middleware/auth.js';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const MAX_SIZE = 20 * 1024 * 1024;
+const MAX_DIMENSION = 2560;
+export const VARIANT_WIDTHS = [480, 960, 1600];
+const OPTIMIZABLE = new Set(['image/jpeg', 'image/png', 'image/webp']);
+
+// sharp ist optional: ohne das Paket werden Bilder unverändert gespeichert.
+let sharpModule;
+export async function loadSharp() {
+  if (sharpModule === undefined) {
+    try {
+      sharpModule = (await import('sharp')).default;
+    } catch {
+      sharpModule = null;
+    }
+  }
+  return sharpModule;
+}
 
 /** Erkennt den Dateityp anhand der Signatur (nicht der Endung) und liest Bildmaße. */
 export function sniff(buf) {
@@ -66,7 +84,17 @@ function jpegSize(buf) {
 }
 
 function shape(row) {
-  return row && { ...row, url: `/uploads/${row.path}`, is_image: row.mime.startsWith('image/') };
+  if (!row) return row;
+  const variants = JSON.parse(row.variants || '[]').map((v) => ({ ...v, url: `/uploads/${v.path}` }));
+  return { ...row, variants, url: `/uploads/${row.path}`, is_image: row.mime.startsWith('image/') };
+}
+
+/** srcset-Attribut aus den Varianten (plus Original als größte Stufe). */
+export function srcsetFor(media) {
+  if (!media.variants?.length) return '';
+  const entries = media.variants.map((v) => `${v.url} ${v.width}w`);
+  if (media.width) entries.push(`${media.url} ${media.width}w`);
+  return entries.join(', ');
 }
 
 export class MediaService {
@@ -96,31 +124,98 @@ export class MediaService {
     return shape(row);
   }
 
-  create(buffer, originalName, userId) {
+  /**
+   * Speichert eine Datei. Bilder werden – wenn sharp verfügbar ist – gedreht (EXIF),
+   * von Metadaten wie GPS-Koordinaten befreit, auf max. 2560 px verkleinert und
+   * zusätzlich als WebP in mehreren Breiten für responsive Bilder abgelegt.
+   */
+  async create(buffer, originalName, userId) {
     if (!buffer?.length) throw badRequest('Leere Datei');
     if (buffer.length > MAX_SIZE) throw badRequest('Datei zu groß (max. 20 MB)');
     const type = sniff(buffer);
     if (!type) throw badRequest('Dateityp nicht erlaubt (erlaubt: JPG, PNG, GIF, WebP, PDF, MP4, MP3)');
     const date = new Date();
     const folder = `${date.getUTCFullYear()}/${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
-    const base = slugify(path.parse(originalName || 'datei').name) || 'datei';
-    const fileName = `${base}-${crypto.randomBytes(4).toString('hex')}.${type.ext}`;
-    const rel = `${folder}/${fileName}`;
+    const base = `${slugify(path.parse(originalName || 'datei').name) || 'datei'}-${crypto.randomBytes(4).toString('hex')}`;
+    const rel = `${folder}/${base}.${type.ext}`;
     fs.mkdirSync(path.join(this.uploadsDir, folder), { recursive: true });
-    fs.writeFileSync(path.join(this.uploadsDir, rel), buffer);
+
+    let data = buffer;
+    let { width = null, height = null } = type;
+    let variants = [];
+    const sharp = OPTIMIZABLE.has(type.mime) ? await loadSharp() : null;
+    if (sharp) {
+      try {
+        const optimized = await this.optimize(sharp, buffer, type);
+        data = optimized.data;
+        width = optimized.width;
+        height = optimized.height;
+        variants = await this.writeVariants(sharp, data, folder, base, width);
+      } catch (err) {
+        throw badRequest(`Bild konnte nicht verarbeitet werden: ${err.message}`);
+      }
+    }
+    fs.writeFileSync(path.join(this.uploadsDir, rel), data);
     const { lastInsertRowid } = this.db.run(
-      `INSERT INTO media (path, original_name, mime, size, width, height, alt, title, created_by, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, '', '', ?, ?)`,
+      `INSERT INTO media (path, original_name, mime, size, width, height, alt, title, variants, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, '', '', ?, ?, ?)`,
       rel,
-      String(originalName || fileName).slice(0, 255),
+      String(originalName || `${base}.${type.ext}`).slice(0, 255),
       type.mime,
-      buffer.length,
-      type.width ?? null,
-      type.height ?? null,
+      data.length,
+      width ?? null,
+      height ?? null,
+      JSON.stringify(variants),
       userId ?? null,
       now(),
     );
     return this.find(lastInsertRowid);
+  }
+
+  async optimize(sharp, buffer, type) {
+    let img = sharp(buffer, { limitInputPixels: 100_000_000 }).rotate();
+    img = img.resize({ width: MAX_DIMENSION, height: MAX_DIMENSION, fit: 'inside', withoutEnlargement: true });
+    if (type.mime === 'image/jpeg') img = img.jpeg({ quality: 82, mozjpeg: true });
+    else if (type.mime === 'image/png') img = img.png({ compressionLevel: 9, palette: false });
+    else img = img.webp({ quality: 80 });
+    // Immer die neu kodierte Fassung verwenden: sie enthält keine Metadaten (z. B. GPS) mehr.
+    const { data, info } = await img.toBuffer({ resolveWithObject: true });
+    return { data, width: info.width, height: info.height };
+  }
+
+  async writeVariants(sharp, data, folder, base, width) {
+    const variants = [];
+    for (const w of VARIANT_WIDTHS) {
+      if (!width || w >= width) continue;
+      const { data: out, info } = await sharp(data).resize({ width: w }).webp({ quality: 78 }).toBuffer({ resolveWithObject: true });
+      const rel = `${folder}/${base}-w${w}.webp`;
+      fs.writeFileSync(path.join(this.uploadsDir, rel), out);
+      variants.push({ width: info.width, height: info.height, path: rel, size: out.length });
+    }
+    return variants;
+  }
+
+  /** Erzeugt Varianten für bereits vorhandene Bilder nach. */
+  async optimizeExisting(id) {
+    const media = this.find(id);
+    const sharp = OPTIMIZABLE.has(media.mime) ? await loadSharp() : null;
+    if (!sharp || media.variants.length) return media;
+    const file = path.join(this.uploadsDir, media.path);
+    const buffer = fs.readFileSync(file);
+    const optimized = await this.optimize(sharp, buffer, { mime: media.mime });
+    const { dir: folder, name } = path.posix.parse(media.path);
+    const variants = await this.writeVariants(sharp, optimized.data, folder, name, optimized.width);
+    fs.writeFileSync(file, optimized.data);
+    this.db.run('UPDATE media SET size = ?, width = ?, height = ?, variants = ? WHERE id = ?', optimized.data.length, optimized.width, optimized.height, JSON.stringify(variants), id);
+    return this.find(id);
+  }
+
+  /** Ordnet Bild-URLs ihren Datensätzen zu (für responsive Bilder in der Ausgabe). */
+  byUrls(urls) {
+    const paths = [...new Set(urls.map((u) => u.replace(/^\/uploads\//, '')))].slice(0, 200);
+    if (!paths.length) return new Map();
+    const rows = this.db.all(`SELECT * FROM media WHERE path IN (${paths.map(() => '?').join(',')})`, ...paths).map(shape);
+    return new Map(rows.map((m) => [m.url, m]));
   }
 
   update(id, { alt, title }) {
@@ -132,7 +227,7 @@ export class MediaService {
   remove(id) {
     const media = this.find(id);
     this.db.run('DELETE FROM media WHERE id = ?', id);
-    fs.rmSync(path.join(this.uploadsDir, media.path), { force: true });
+    for (const p of [media.path, ...media.variants.map((v) => v.path)]) fs.rmSync(path.join(this.uploadsDir, p), { force: true });
   }
 
   stats() {
@@ -146,6 +241,8 @@ export default {
   description: 'Medienbibliothek für Bilder, PDFs, Audio und Video mit Upload und Auswahldialog.',
   version: '1.0.0',
   adminDir: path.join(dir, 'admin'),
+  // Autoren dürfen hochladen und eigene Dateien bearbeiten
+  authors: true,
   migrations: [
     {
       version: 1,
@@ -165,32 +262,77 @@ export default {
         );
       `,
     },
+    {
+      version: 2,
+      sql: "ALTER TABLE media ADD COLUMN variants TEXT NOT NULL DEFAULT '[]';",
+    },
   ],
 
   setup(ctx) {
     ctx.media = new MediaService(ctx.db, ctx.config.uploadsDir);
+    // Responsive Bilder: <img> mit Upload-Pfad erhält srcset, sizes, Maße und Lazy Loading
+    ctx.hooks.on(
+      'site.content',
+      (html) => {
+        const urls = [...html.matchAll(/<img\b[^>]*?\ssrc="(\/uploads\/[^"]+)"/gi)].map((m) => m[1]);
+        if (!urls.length) return html;
+        const media = ctx.media.byUrls(urls);
+        return html.replace(/<img\b([^>]*?)\ssrc="(\/uploads\/[^"]+)"([^>]*)>/gi, (tag, before, src, after) => {
+          const m = media.get(src);
+          if (!m) return tag;
+          const attrs = `${before} ${after}`;
+          let extra = '';
+          const srcset = srcsetFor(m);
+          if (srcset && !/\ssrcset=/i.test(attrs)) extra += ` srcset="${srcset}" sizes="(max-width: 800px) 100vw, 800px"`;
+          if (m.width && !/\swidth=/i.test(attrs)) extra += ` width="${m.width}" height="${m.height}"`;
+          if (!/\sloading=/i.test(attrs)) extra += ' loading="lazy" decoding="async"';
+          if (!/\salt=/i.test(attrs)) extra += ` alt="${escapeHtml(m.alt)}"`;
+          return `<img${before} src="${src}"${extra}${after}>`;
+        });
+      },
+      { module: 'media' },
+    );
     ctx.hooks.on('admin.dashboard', () => ({ media: ctx.media.stats() }), { module: 'media' });
   },
 
   api(router, ctx) {
     const r = Router();
     r.get('/', (req, res) => res.json(ctx.media.list(req.query, pagination(req.query, { defaultPerPage: 40 }))));
-    r.post('/', express.raw({ type: () => true, limit: MAX_SIZE }), (req, res) => {
+    r.post('/', express.raw({ type: () => true, limit: MAX_SIZE }), async (req, res) => {
       let name = req.get('x-filename') || '';
       try {
         name = decodeURIComponent(name);
       } catch {
         /* Rohwert verwenden */
       }
-      res.status(201).json(ctx.media.create(req.body, name, req.user?.id));
+      res.status(201).json(await ctx.media.create(req.body, name, req.user?.id));
+    });
+    // Varianten für ältere Bilder nachträglich erzeugen
+    r.post('/optimize', requireEditor, async (req, res) => {
+      const ids = ctx.db.all("SELECT id FROM media WHERE mime IN ('image/jpeg', 'image/png', 'image/webp') AND variants = '[]'").map((m) => m.id);
+      let done = 0;
+      for (const id of ids) {
+        try {
+          if ((await ctx.media.optimizeExisting(id)).variants.length) done++;
+        } catch (err) {
+          ctx.logger.warn(`[media] Bild ${id} konnte nicht optimiert werden: ${err.message}`);
+        }
+      }
+      res.json({ checked: ids.length, optimized: done, available: Boolean(await loadSharp()) });
     });
     r.get('/:id', (req, res) => res.json(ctx.media.find(parseId(req.params.id))));
+    // Autoren ändern und löschen nur ihre eigenen Uploads
+    const own = (req) => {
+      const m = ctx.media.find(parseId(req.params.id));
+      if (isAuthor(req) && m.created_by !== req.user?.id) throw forbidden('Autoren können nur eigene Dateien ändern');
+      return m;
+    };
     r.put('/:id', (req, res) => {
       const data = validate(req.body, { alt: { type: 'string', max: 300 }, title: { type: 'string', max: 300 } }, { partial: true });
-      res.json(ctx.media.update(parseId(req.params.id), data));
+      res.json(ctx.media.update(own(req).id, data));
     });
     r.delete('/:id', (req, res) => {
-      ctx.media.remove(parseId(req.params.id));
+      ctx.media.remove(own(req).id);
       res.status(204).end();
     });
     router.use('/media', r);

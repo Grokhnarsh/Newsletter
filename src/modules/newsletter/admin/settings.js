@@ -1,7 +1,7 @@
 import { get, post } from '/admin/js/api.js';
 import { saveSettings } from '/admin/js/settings.js';
 import { ctx } from '/admin/js/state.js';
-import { $, formData, html, raw, setHtml, toast, toastError } from '/admin/js/ui.js';
+import { $, confirmDialog, formData, html, raw, setHtml, toast, toastError } from '/admin/js/ui.js';
 
 const TRANSPORT_INFO = {
   smtp: 'SMTP – E-Mails werden über den konfigurierten SMTP-Server versendet.',
@@ -37,6 +37,15 @@ export async function newsletterSettingsTab(box) {
         </div>
       </div>
       <div class="card">
+        <h2>Öffnungs- und Klick-Tracking</h2>
+        <div class="field"><label for="s-track">Tracking</label><select id="s-track" name="tracking_mode" ${disabled}>
+          <option value="all" ${s.tracking_mode === 'all' ? raw('selected') : ''}>Für alle Abonnenten (je Kampagne abschaltbar)</option>
+          <option value="consent" ${s.tracking_mode === 'consent' ? raw('selected') : ''}>Nur mit ausdrücklicher Einwilligung</option>
+          <option value="off" ${s.tracking_mode === 'off' ? raw('selected') : ''}>Aus – keine Öffnungs- und Klickauswertung</option>
+        </select><div class="help">Mit „Einwilligung“ erscheint im Anmeldeformular und auf der Einstellungsseite der Abonnenten ein zusätzliches Häkchen.</div></div>
+        <div class="field"><label for="s-ctext">Text der Einwilligung</label><textarea id="s-ctext" name="tracking_consent_text" maxlength="1000" style="min-height:70px" ${disabled}>${s.tracking_consent_text}</textarea></div>
+      </div>
+      <div class="card">
         <h2>Website-Integration</h2>
         <label class="checkline"><input type="checkbox" name="newsletter_footer_widget" ${s.newsletter_footer_widget ? raw('checked') : ''} ${disabled}> Anmeldeformular in der Fußzeile der Website anzeigen</label>
         <label class="checkline"><input type="checkbox" name="newsletter_auto_campaign" ${s.newsletter_auto_campaign ? raw('checked') : ''} ${disabled}> Neue Blogbeiträge automatisch als Kampagnenentwurf anlegen</label>
@@ -52,8 +61,44 @@ export async function newsletterSettingsTab(box) {
           ? html`<form id="test-mail" class="toolbar"><input type="email" name="to" required value="${ctx.user.email}" style="max-width:300px" aria-label="Empfänger"><button class="btn" type="submit">Testnachricht senden</button></form>`
           : ''
       }
+    </div>
+    <div class="card">
+      <h2>Bounce- und Beschwerde-Webhooks</h2>
+      <p class="muted">Trage die passende Adresse beim E-Mail-Anbieter als Webhook für Bounces und Spam-Beschwerden ein. Betroffene Adressen werden automatisch gesperrt
+      (Hard-Bounce und Beschwerde sofort, Soft-Bounces nach drei Fehlschlägen in 30 Tagen). Bei Amazon SES ein SNS-Thema mit HTTPS-Abonnement auf die Adresse anlegen – die Bestätigung erfolgt automatisch.</p>
+      <div class="table-wrap"><table><tbody id="hook-rows"><tr><td class="muted">Lädt …</td></tr></tbody></table></div>
+      ${ctx.isAdmin ? html`<button class="btn btn-sm" id="hook-renew" style="margin-top:10px">Adressen erneuern</button>` : ''}
     </div>`,
   );
+
+  const renderHooks = (rows) =>
+    setHtml(
+      $('#hook-rows', box),
+      html`${rows.map(
+        (h) => html`<tr><td class="nowrap"><strong>${h.label}</strong></td><td><code style="overflow-wrap:anywhere">${h.url}</code></td>
+          <td class="right"><button class="btn btn-sm" data-copy="${h.url}">Kopieren</button></td></tr>`,
+      )}`,
+    );
+  get('/newsletter/bounce-urls').then(renderHooks).catch(toastError);
+  $('#hook-rows', box).addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-copy]');
+    if (!b) return;
+    try {
+      await navigator.clipboard.writeText(b.dataset.copy);
+      toast('Adresse kopiert');
+    } catch {
+      toast('Kopieren nicht möglich – bitte manuell markieren', 'error');
+    }
+  });
+  $('#hook-renew', box)?.addEventListener('click', async () => {
+    if (!(await confirmDialog('Webhook-Adressen erneuern', 'Die bisherigen Adressen funktionieren danach nicht mehr und müssen beim Anbieter ersetzt werden.', { submitLabel: 'Erneuern' }))) return;
+    try {
+      renderHooks(await post('/newsletter/bounce-urls/renew'));
+      toast('Neue Adressen erzeugt');
+    } catch (err) {
+      toastError(err);
+    }
+  });
 
   $('#general', box).addEventListener('submit', async (e) => {
     e.preventDefault();

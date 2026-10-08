@@ -1,10 +1,13 @@
 import { Router } from 'express';
-import { parseId, validate } from '../../lib/validate.js';
-import { requireAdmin } from '../../middleware/auth.js';
+import { escapeHtml } from '../../lib/render.js';
+import { randomToken } from '../../lib/security.js';
+import { pagination, parseId, validate } from '../../lib/validate.js';
+import { isAuthor, requireAdmin } from '../../middleware/auth.js';
+import { ROLES } from '../users.js';
 
 /** Systemrouten des Kerns: Module, Benutzer, API-Schlüssel, Einstellungen. */
 export function systemRoutes(ctx) {
-  const { users, settings, modules, content, mailer, hooks } = ctx;
+  const { users, settings, modules, content, mailer, hooks, audit, systemMail, config, backups } = ctx;
   const router = Router();
 
   // ---- Module ----
@@ -20,7 +23,9 @@ export function systemRoutes(ctx) {
 
   // Kennzahlen aller aktiven Module für das Dashboard
   router.get('/system/dashboard', (req, res) => {
-    res.json(Object.assign({}, ...hooks.collect('admin.dashboard', req)));
+    // Autoren sehen nur Kennzahlen der Module, die sie auch bedienen dürfen
+    const handlers = hooks.active('admin.dashboard').filter((h) => !isAuthor(req) || modules.get(h.module)?.authors);
+    res.json(Object.assign({}, ...handlers.map((h) => h.fn(req)).filter(Boolean)));
   });
 
   // ---- Benutzer ----
@@ -28,13 +33,31 @@ export function systemRoutes(ctx) {
     email: { type: 'email', required: true },
     name: { type: 'string', max: 200 },
     password: { type: 'string', required: true, min: 10, max: 200, trim: false },
-    role: { type: 'enum', values: ['admin', 'editor'], default: 'editor' },
+    role: { type: 'enum', values: ROLES, default: 'editor' },
   };
 
   router.get('/users', requireAdmin, (req, res) => res.json(users.list()));
 
-  router.post('/users', requireAdmin, (req, res) => {
-    res.status(201).json(users.create(validate(req.body, userSchema)));
+  const sendAccessLink = (user) => {
+    const url = `${config.baseUrl}/admin/#/reset/${users.createPasswordReset(user.id)}`;
+    return systemMail.send({
+      to: user.email,
+      subject: `Zugang zu ${settings.get('site_name')}`,
+      html: `<p>Hallo ${escapeHtml(user.name || '')},</p>
+<p>über diesen Link kannst du innerhalb von 60 Minuten ein (neues) Passwort für deinen Zugang festlegen:</p>
+${systemMail.button(url, 'Passwort festlegen')}
+<p style="color:#6b7280;font-size:13px;">Anmeldung danach unter ${escapeHtml(config.baseUrl)}/admin/</p>`,
+    });
+  };
+
+  // Mit `invite: true` wird kein Passwort benötigt – der Benutzer legt es selbst per Link fest.
+  router.post('/users', requireAdmin, async (req, res) => {
+    const invite = req.body?.invite === true;
+    const schema = invite ? { ...userSchema, password: { ...userSchema.password, required: false } } : userSchema;
+    const data = validate(req.body, schema);
+    const user = users.create({ ...data, password: data.password || randomToken(32) });
+    if (invite) await sendAccessLink(user);
+    res.status(201).json(user);
   });
 
   router.put('/users/:id', requireAdmin, (req, res) => {
@@ -48,6 +71,65 @@ export function systemRoutes(ctx) {
   router.delete('/users/:id', requireAdmin, (req, res) => {
     users.remove(parseId(req.params.id), req.user.id);
     res.status(204).end();
+  });
+
+  // Zwei-Faktor-Anmeldung eines Kontos zurücksetzen (z. B. Gerät verloren)
+  router.post('/users/:id/reset-2fa', requireAdmin, (req, res) => {
+    const id = parseId(req.params.id);
+    users.find(id);
+    users.disableTotp(id);
+    users.destroyUserSessions(id);
+    res.json(users.find(id));
+  });
+
+  // Link zum Festlegen eines neuen Passworts per E-Mail schicken
+  router.post('/users/:id/send-reset', requireAdmin, async (req, res) => {
+    await sendAccessLink(users.find(parseId(req.params.id)));
+    res.json({ ok: true });
+  });
+
+  // ---- Seiten-Cache ----
+  router.get('/system/cache', requireAdmin, (req, res) => res.json(ctx.cache.stats()));
+  router.delete('/system/cache', requireAdmin, (req, res) => {
+    ctx.cache.clear();
+    res.status(204).end();
+  });
+
+  // ---- Suchindex ----
+  router.post('/system/search/rebuild', requireAdmin, (req, res) => {
+    res.json({ documents: ctx.search.rebuild() });
+  });
+
+  // ---- Backups ----
+  router.get('/system/backups', requireAdmin, (req, res) => res.json(backups.list()));
+
+  router.post('/system/backups', requireAdmin, async (req, res) => {
+    res.status(201).json(await backups.createFile());
+  });
+
+  // Direkter Download eines frischen Backups (ohne Speichern auf dem Server)
+  router.get('/system/backup', requireAdmin, async (req, res) => {
+    res.set('Content-Type', 'application/zip');
+    res.set('Content-Disposition', `attachment; filename="${backups.fileName()}"`);
+    audit.log(req, 'backup_download', 'live');
+    await backups.write(res);
+    res.end();
+  });
+
+  router.get('/system/backups/:name', requireAdmin, (req, res) => {
+    const file = backups.pathFor(req.params.name);
+    audit.log(req, 'backup_download', req.params.name);
+    res.download(file, req.params.name);
+  });
+
+  router.delete('/system/backups/:name', requireAdmin, (req, res) => {
+    backups.remove(req.params.name);
+    res.status(204).end();
+  });
+
+  // ---- Änderungsprotokoll ----
+  router.get('/system/audit', requireAdmin, (req, res) => {
+    res.json(audit.list(req.query, pagination(req.query, { defaultPerPage: 50 })));
   });
 
   // ---- API-Schlüssel ----
@@ -65,7 +147,10 @@ export function systemRoutes(ctx) {
 
   // ---- Einstellungen (Kern + alle Module) ----
   router.get('/settings', (req, res) => {
-    res.json({ ...settings.all(), mail_transport: mailer.kind });
+    const all = settings.all();
+    // Geheimnisse (z. B. Webhook-Schlüssel) bleiben Autoren verborgen
+    if (isAuthor(req)) for (const key of Object.keys(all)) if (/secret|token|password|webhook/i.test(key)) delete all[key];
+    res.json({ ...all, mail_transport: mailer.kind });
   });
 
   router.put('/settings', requireAdmin, (req, res) => {

@@ -36,6 +36,7 @@ export function loadConfig(overrides = {}) {
     baseUrl: (env.BASE_URL || `http://localhost:${port}`).replace(/\/+$/, ''),
     databasePath: env.DATABASE_PATH || path.join(ROOT, 'data', 'newsletter.db'),
     uploadsDir: env.UPLOADS_DIR || path.join(ROOT, 'data', 'uploads'),
+    backupsDir: env.BACKUPS_DIR || path.join(ROOT, 'data', 'backups'),
     modulesDir: env.MODULES_DIR || path.join(ROOT, 'modules'),
     theme: env.THEME || 'default',
     trustProxy: bool(env.TRUST_PROXY, false),

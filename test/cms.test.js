@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { after, before, describe, test } from 'node:test';
 import { createCms } from '../src/app.js';
 import { sanitizeContent, slugify } from '../src/core/content.js';
+import { builtinModules } from '../src/modules/index.js';
 import { HookBus } from '../src/core/hooks.js';
 import { loadConfig } from '../src/config.js';
 import { openDatabase } from '../src/db/index.js';
@@ -14,6 +15,8 @@ import { createMemoryMailer } from '../src/lib/mailer.js';
 import { sniff } from '../src/modules/media/index.js';
 import { migrations as newsletterMigrations } from '../src/modules/newsletter/migrations.js';
 import { startTestServer } from './helpers.js';
+
+const BUILTIN = builtinModules.map((m) => m.name);
 
 // Minimales gültiges PNG (1×1 Pixel)
 const PNG = Buffer.from(
@@ -79,18 +82,19 @@ describe('Module', () => {
 
   test('alle Module sind geladen und aktiv; Einrichtung legt Startinhalte an', async () => {
     const mods = (await t.get('/api/system/modules')).data;
-    assert.deepEqual(mods.map((m) => m.name), ['media', 'pages', 'blog', 'menus', 'newsletter']);
+    assert.deepEqual(mods.map((m) => m.name), BUILTIN);
+    for (const name of ['media', 'pages', 'blog', 'menus', 'newsletter']) assert.ok(BUILTIN.includes(name), name);
     assert.ok(mods.every((m) => m.enabled));
     assert.ok(mods.every((m) => m.admin_entry?.startsWith(`/admin/modules/${m.name}/`)));
     const pages = (await t.get('/api/pages')).data;
     assert.ok(pages.find((p) => p.is_home && p.status === 'published'));
     assert.equal((await t.get('/api/posts')).data.total, 1);
     const menus = (await t.get('/api/menus')).data;
-    assert.deepEqual(menus.find((m) => m.location === 'main').items.map((i) => i.label), ['Start', 'Über uns', 'Blog', 'Newsletter']);
+    assert.deepEqual(menus.find((m) => m.location === 'main').items.map((i) => i.label), ['Start', 'Über uns', 'Blog', 'Kontakt', 'Newsletter']);
   });
 
   test('Admin-Skripte der Module werden ausgeliefert', async () => {
-    for (const name of ['media', 'pages', 'blog', 'menus', 'newsletter']) {
+    for (const name of BUILTIN) {
       const res = await t.get(`/admin/modules/${name}/index.js`, { auth: false });
       assert.equal(res.status, 200, name);
       assert.match(res.headers.get('content-type'), /javascript/);
@@ -338,18 +342,18 @@ describe('Menüs & Website', () => {
 
   test('Menü mit Untereinträgen; Entwürfe werden ausgeblendet', async () => {
     const draft = (await t.post('/api/pages', { title: 'Bald' })).data;
-    const pub = (await t.post('/api/pages', { title: 'Kontakt', status: 'published' })).data;
+    const pub = (await t.post('/api/pages', { title: 'Anfahrt', status: 'published' })).data;
     const saved = await t.put('/api/menus/main', {
       items: [
         { type: 'home', label: 'Start' },
-        { type: 'page', label: 'Kontakt', target_id: pub.id, children: [{ type: 'custom', label: 'Extern', url: 'https://example.org', new_tab: true }] },
+        { type: 'page', label: 'Anfahrt', target_id: pub.id, children: [{ type: 'custom', label: 'Extern', url: 'https://example.org', new_tab: true }] },
         { type: 'page', label: 'Bald', target_id: draft.id },
       ],
     });
     assert.equal(saved.status, 200);
     assert.equal(saved.data[1].children.length, 1);
     const html = (await t.get('/', { auth: false })).data;
-    assert.match(html, /href="\/kontakt"/);
+    assert.match(html, /href="\/anfahrt"/);
     assert.match(html, /class="submenu".*href="https:\/\/example.org" target="_blank" rel="noopener noreferrer"/s);
     assert.doesNotMatch(html, />Bald</);
   });
@@ -457,8 +461,8 @@ describe('Migration bestehender Installationen', () => {
     const db = openDatabase(file);
     const { ctx } = await createCms({ db, config, mailer: createMemoryMailer(), logger: { log() {}, warn() {}, error() {} } });
     assert.equal(ctx.subscribers.findByEmail('alt@example.com').status, 'active');
-    const migrated = db.all('SELECT module FROM module_migrations ORDER BY module').map((r) => r.module);
-    assert.deepEqual(migrated, ['blog', 'media', 'menus', 'newsletter', 'pages']);
+    const migrated = db.all('SELECT DISTINCT module FROM module_migrations ORDER BY module').map((r) => r.module);
+    assert.deepEqual(migrated, builtinModules.filter((m) => m.migrations?.length).map((m) => m.name).sort());
     assert.ok(db.get("SELECT 1 AS ok FROM sqlite_master WHERE name = 'content_revisions'"));
     db.close();
     for (const suffix of ['', '-wal', '-shm']) fs.rmSync(file + suffix, { force: true });

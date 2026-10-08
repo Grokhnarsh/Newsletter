@@ -34,15 +34,57 @@ export class SiteService {
     return `${this.config.baseUrl}${p.startsWith('/') ? p : `/${p}`}`;
   }
 
-  menu(location) {
-    return this.hooks.first('site.menu', location) || [];
+  menu(location, lang) {
+    return this.hooks.first('site.menu', location, lang) || [];
+  }
+
+  /**
+   * Sprachumschalter und hreflang-Verweise. `view.alternates` ([{ lang, url }]) nennt
+   * Übersetzungen des aktuellen Inhalts; sonst führt der Umschalter zur Startseite der Sprache.
+   */
+  languageLinks(req, view) {
+    const i18n = this.i18n;
+    if (!i18n?.isMulti()) return { languages: [], hreflang: '' };
+    const lang = req?.lang || i18n.defaultLang();
+    const alternates = new Map((view.alternates || []).map((a) => [a.lang, a.url]));
+    const languages = i18n.languages().map((code) => ({
+      code,
+      label: i18n.label(code),
+      url: alternates.get(code) || i18n.path('/', code),
+      current: code === lang,
+      translated: alternates.has(code),
+    }));
+    const hreflang = view.alternates?.length > 1 && !view.noindex
+      ? [...alternates]
+          .map(([code, url]) => `<link rel="alternate" hreflang="${escapeHtml(code)}" href="${escapeHtml(this.url(url))}">`)
+          .concat(alternates.has(i18n.defaultLang()) ? [`<link rel="alternate" hreflang="x-default" href="${escapeHtml(this.url(alternates.get(i18n.defaultLang())))}">`] : [])
+          .join('\n')
+      : '';
+    return { languages, hreflang };
+  }
+
+  /** Text des Themes in der Sprache der Anfrage. */
+  t(req, key) {
+    return this.i18n ? this.i18n.t(req?.lang || this.i18n.defaultLang(), key) : key;
+  }
+
+  /** Pfad in der Sprache der Anfrage (z. B. '/' → '/en'). */
+  localPath(req, p) {
+    return this.i18n ? this.i18n.path(p, req?.lang) : p;
   }
 
   /** Rendert eine Ansicht im Theme-Layout. */
   render(req, view) {
     const s = this.settings.all();
-    const pathName = req?.path || '/';
+    const pathName = req?.originalUrl?.split('?')[0] || req?.path || '/';
+    const lang = req?.lang || this.i18n?.defaultLang() || 'de';
+    const { languages, hreflang } = this.languageLinks(req, view);
     return this.theme.layout({
+      lang,
+      languages,
+      homeUrl: this.localPath(req, '/'),
+      searchUrl: this.localPath(req, '/suche'),
+      t: (key) => this.t(req, key),
       site: {
         name: s.site_name,
         tagline: s.site_tagline,
@@ -66,9 +108,9 @@ export class SiteService {
       bodyClass: view.bodyClass || '',
       isHome: Boolean(view.isHome),
       currentPath: pathName,
-      content: view.content || '',
-      menus: { main: this.menu('main'), footer: this.menu('footer') },
-      head: this.hooks.collect('site.head', req).join('\n'),
+      content: this.hooks.filter('site.content', view.content || '', req),
+      menus: { main: this.menu('main', lang), footer: this.menu('footer', lang) },
+      head: [hreflang, ...this.hooks.collect('site.head', req)].filter(Boolean).join('\n'),
       widgets: {
         top: this.hooks.collect('site.widgets', 'top', req).join('\n'),
         footer: this.hooks.collect('site.widgets', 'footer', req).join('\n'),
@@ -78,7 +120,10 @@ export class SiteService {
   }
 
   send(req, res, view) {
-    res.status(view.status || 200).type('html').send(this.render(req, view));
+    const status = view.status || 200;
+    // Nur allgemeine, nicht personalisierte Seiten dürfen zwischengespeichert werden
+    if (status === 200 && !view.noindex && view.cache !== false) res.locals.cacheable = true;
+    res.status(status).type('html').send(this.render(req, view));
   }
 
   /** Einfache Meldungsseite (z. B. „Anmeldung bestätigt“). */
@@ -93,13 +138,15 @@ export class SiteService {
   }
 
   notFound(req, res) {
+    if (req.method === 'GET') this.hooks.collect('site.not_found', req);
+    const t = (k) => escapeHtml(this.t(req, k));
     this.send(req, res, {
-      title: 'Seite nicht gefunden',
+      title: this.t(req, 'notFound'),
       status: 404,
       noindex: true,
-      content: `<div class="panel"><h1>Seite nicht gefunden</h1><p>Die angeforderte Seite existiert nicht (mehr).</p>
-        <form class="search-form" action="/suche" method="get"><input type="search" name="q" placeholder="Website durchsuchen …" aria-label="Suche"><button type="submit">Suchen</button></form>
-        <p><a href="/">Zur Startseite</a></p></div>`,
+      content: `<div class="panel"><h1>${t('notFound')}</h1><p>${t('notFoundText')}</p>
+        <form class="search-form" action="/suche" method="get"><input type="search" name="q" placeholder="${t('search')}" aria-label="${t('searchLabel')}"><button type="submit">${t('searchButton')}</button></form>
+        <p><a href="${escapeHtml(this.localPath(req, '/'))}">${t('toHome')}</a></p></div>`,
     });
   }
 
@@ -122,24 +169,34 @@ export class SiteService {
 
     router.get('/suche', (req, res) => {
       const q = String(req.query.q || '').trim().slice(0, 100);
-      const results = q.length >= 2 ? this.hooks.collect('site.search', q) : [];
+      // Volltextindex plus Treffer von Modulen, die eigene Suchen anbieten
+      const all =
+        q.length >= 2
+          ? [
+              ...(this.search?.query(q) || []),
+              ...this.hooks.collect('site.search', q).map((r) => ({ ...r, excerptHtml: escapeHtml(r.excerpt || '') })),
+            ]
+          : [];
+      // Nur Treffer in der Sprache der Anfrage
+      const results = this.i18n?.isMulti() ? all.filter((r) => this.i18n.langOfPath(r.url) === req.lang) : all;
+      const t = (k) => escapeHtml(this.t(req, k));
       this.send(req, res, {
-        title: q ? `Suche: ${q}` : 'Suche',
+        title: q ? `${this.t(req, 'searchTitle')}: ${q}` : this.t(req, 'searchTitle'),
         noindex: true,
-        content: `<div class="panel"><h1>Suche</h1>
-          <form class="search-form" action="/suche" method="get"><input type="search" name="q" value="${escapeHtml(q)}" placeholder="Suchbegriff …" aria-label="Suchbegriff" autofocus><button type="submit">Suchen</button></form>
+        content: `<div class="panel"><h1>${t('searchTitle')}</h1>
+          <form class="search-form" action="${escapeHtml(this.localPath(req, '/suche'))}" method="get"><input type="search" name="q" value="${escapeHtml(q)}" placeholder="${t('search')}" aria-label="${t('searchLabel')}" autofocus><button type="submit">${t('searchButton')}</button></form>
           ${
             q.length >= 2
               ? results.length
-                ? `<p class="muted">${results.length} Treffer</p><ul class="search-results">${results
+                ? `<p class="muted">${results.length} ${t('results')}</p><ul class="search-results">${results
                     .map(
                       (r) =>
-                        `<li><span class="tag">${escapeHtml(r.type)}</span> <a href="${escapeHtml(r.url)}">${escapeHtml(r.title)}</a>${r.excerpt ? `<p>${escapeHtml(r.excerpt)}</p>` : ''}</li>`,
+                        `<li><span class="tag">${escapeHtml(r.type)}</span> <a href="${escapeHtml(r.url)}">${escapeHtml(r.title)}</a>${r.excerptHtml ? `<p>${r.excerptHtml}</p>` : ''}</li>`,
                     )
                     .join('')}</ul>`
-                : '<p>Keine Treffer gefunden.</p>'
+                : `<p>${t('noResults')}</p>`
               : q
-                ? '<p class="muted">Bitte mindestens zwei Zeichen eingeben.</p>'
+                ? `<p class="muted">${t('minChars')}</p>`
                 : ''
           }</div>`,
       });

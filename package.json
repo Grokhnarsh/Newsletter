@@ -12,11 +12,16 @@
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning src/server.js",
     "dev": "node --disable-warning=ExperimentalWarning --watch src/server.js",
-    "test": "node --disable-warning=ExperimentalWarning --test --test-concurrency=1 \"test/**/*.test.js\""
+    "test": "node --disable-warning=ExperimentalWarning --test --test-concurrency=1 \"test/**/*.test.js\"",
+    "restore": "node --disable-warning=ExperimentalWarning src/tools/restore.js"
   },
   "dependencies": {
     "express": "^5.2.1",
     "nodemailer": "^10.0.13",
+    "qrcode-svg": "^1.1.0",
     "sanitize-html": "^2.18.0"
+  },
+  "optionalDependencies": {
+    "sharp": "^0.35.5"
   }
 }

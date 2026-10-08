@@ -122,6 +122,7 @@ export class ModuleManager {
       version: m.version || '1.0.0',
       requires: m.requires,
       core: Boolean(m.core),
+      authors: Boolean(m.authors),
       enabled: this.isEnabled(m.name),
       admin_entry: m.adminDir ? `/admin/modules/${m.name}/${m.adminEntry || 'index.js'}` : null,
     }));
@@ -140,9 +141,10 @@ export class ModuleManager {
   }
 
   /** Router, der nur antwortet, solange das Modul aktiv ist. */
-  guardedRouter(name) {
+  guardedRouter(name, { editorsOnly = false } = {}) {
     const router = Router();
-    router.use((req, res, next) => (this.isEnabled(name) ? next() : next('router')));
+    // Autoren erreichen nur die API von Modulen, die das ausdrücklich erlauben (`authors: true`)
+    router.use((req, res, next) => (this.isEnabled(name) && !(editorsOnly && req.auth?.role === 'author') ? next() : next('router')));
     return router;
   }
 
@@ -150,7 +152,7 @@ export class ModuleManager {
     const routers = [];
     for (const mod of this.list()) {
       if (typeof mod[kind] !== 'function') continue;
-      const router = this.guardedRouter(mod.name);
+      const router = this.guardedRouter(mod.name, { editorsOnly: kind === 'api' && !mod.authors });
       mod[kind](router, ctx);
       routers.push(router);
     }

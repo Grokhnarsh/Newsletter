@@ -77,14 +77,25 @@ export class Database {
     );
     for (const migration of migrations) {
       if (applied.has(migration.version)) continue;
-      this.transaction(() => {
-        this.exec(migration.sql);
-        if (module === 'core') {
-          this.run('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)', migration.version, new Date().toISOString());
-        } else {
-          this.run('INSERT INTO module_migrations (module, version, applied_at) VALUES (?, ?, ?)', module, migration.version, new Date().toISOString());
-        }
-      });
+      // Tabellen-Umbauten (neu anlegen, kopieren, umbenennen) brauchen ausgeschaltete
+      // Fremdschlüssel – sonst würde DROP TABLE abhängige Zeilen mitlöschen.
+      if (migration.foreignKeysOff) this.exec('PRAGMA foreign_keys = OFF');
+      try {
+        this.transaction(() => {
+          this.exec(migration.sql);
+          if (migration.foreignKeysOff) {
+            const broken = this.all('PRAGMA foreign_key_check');
+            if (broken.length) throw new Error(`Migration ${module}/${migration.version}: Fremdschlüssel verletzt (${broken[0].table})`);
+          }
+          if (module === 'core') {
+            this.run('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)', migration.version, new Date().toISOString());
+          } else {
+            this.run('INSERT INTO module_migrations (module, version, applied_at) VALUES (?, ?, ?)', module, migration.version, new Date().toISOString());
+          }
+        });
+      } finally {
+        if (migration.foreignKeysOff) this.exec('PRAGMA foreign_keys = ON');
+      }
     }
   }
 

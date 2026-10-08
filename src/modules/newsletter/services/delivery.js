@@ -52,8 +52,22 @@ export class DeliveryService {
     return this.campaigns.layoutFor(campaign);
   }
 
-  /** Rendert eine Kampagne für einen Empfänger (mit Tracking, falls aktiviert). */
+  /** Darf bei diesem Abonnenten getrackt werden? (Einstellung tracking_mode: all / consent / off) */
+  trackingAllowed(subscriber) {
+    const mode = this.settings.get('tracking_mode');
+    if (mode === 'off') return false;
+    if (mode === 'consent') return Boolean(subscriber?.tracking_consent);
+    return true;
+  }
+
+  /** Kampagne aus Sicht eines Empfängers (A/B-Variante B bekommt den zweiten Betreff). */
+  forVariant(campaign, variant) {
+    return variant === 'b' && campaign.subject_b ? { ...campaign, subject: campaign.subject_b } : campaign;
+  }
+
+  /** Rendert eine Kampagne für einen Empfänger (mit Tracking, falls aktiviert und erlaubt). */
   renderForRecipient(campaign, subscriber, recipientToken, { linkMap, tracking = true } = {}) {
+    tracking = tracking && this.trackingAllowed(subscriber);
     const links = linkMap || this.campaigns.linkMap(campaign.id);
     const trackLink =
       tracking && campaign.track_clicks && recipientToken
@@ -131,6 +145,25 @@ export class DeliveryService {
     this.subscribers.markConfirmationSent(subscriber.id);
   }
 
+  /** Ein Schritt einer Automation (ohne Öffnungs-/Klick-Tracking). */
+  async sendAutomationStep(step, subscriber) {
+    const rendered = renderEmail({
+      campaign: { subject: step.subject, preheader: step.preheader, content_html: step.content_html, content_text: '' },
+      layout: this.templates.findOptional(step.template_id || this.settings.get('default_template_id'))?.html,
+      vars: this.vars(subscriber),
+    });
+    const unsubscribeUrl = this.url(`/unsubscribe/${subscriber.token}`);
+    await this.mailer.send({
+      from: this.fromHeader(),
+      replyTo: this.settings.get('reply_to') || undefined,
+      to: subscriber.email,
+      subject: rendered.subject,
+      html: rendered.html,
+      text: rendered.text,
+      headers: { 'List-Unsubscribe': `<${unsubscribeUrl}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click', 'X-Automation-Step': String(step.id) },
+    });
+  }
+
   async sendWelcome(subscriber) {
     const s = this.settings.all();
     if (!s.welcome_enabled) return;
@@ -195,18 +228,23 @@ export class DeliveryService {
     }
   }
 
-  /** Ein Durchlauf: fällige Kampagnen starten, Warteschlange abarbeiten, Abschluss prüfen. */
+  /**
+   * Ein Durchlauf: fällige Kampagnen starten, A/B-Tests auswerten, Warteschlange und
+   * Automationen abarbeiten (gemeinsames Versandkontingent), Abschluss prüfen.
+   */
   async runOnce({ limit = Infinity } = {}) {
     this.campaigns.startDue();
+    this.campaigns.decideAbTests();
     let processed = 0;
     if (limit > 0) processed = await this.processQueue(limit);
+    if (this.automations && limit - processed > 0) processed += await this.automations.runDue(limit - processed);
     this.campaigns.finishCompleted();
     return processed;
   }
 
   async processQueue(limit) {
     const rows = this.db.all(
-      `SELECT r.id, r.token, r.attempts, r.campaign_id, r.subscriber_id
+      `SELECT r.id, r.token, r.attempts, r.campaign_id, r.subscriber_id, r.variant
        FROM campaign_recipients r JOIN campaigns c ON c.id = r.campaign_id
        WHERE c.status = 'sending' AND r.status = 'queued' AND (r.next_attempt_at IS NULL OR r.next_attempt_at <= ?)
        ORDER BY r.id LIMIT ?`,
@@ -234,7 +272,8 @@ export class DeliveryService {
     return processed;
   }
 
-  async deliver(row, { campaign, linkMap }) {
+  async deliver(row, { campaign: base, linkMap }) {
+    const campaign = this.forVariant(base, row.variant);
     const subscriber = row.subscriber_id ? this.db.get('SELECT * FROM subscribers WHERE id = ?', row.subscriber_id) : null;
     if (!subscriber || subscriber.status !== 'active') {
       this.db.run("UPDATE campaign_recipients SET status = 'skipped', error = ? WHERE id = ?", 'Abonnent nicht mehr aktiv', row.id);

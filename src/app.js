@@ -1,14 +1,22 @@
 import path from 'node:path';
 import express from 'express';
+import { AuditLog, auditMiddleware } from './core/audit.js';
+import { BACKUP_SETTINGS, BackupService } from './core/backup.js';
+import { CACHE_SETTINGS, PageCache } from './core/cache.js';
 import { ContentService } from './core/content.js';
 import { HookBus } from './core/hooks.js';
+import { I18N_SETTINGS, I18n } from './core/i18n.js';
+import { MAIL_SETTINGS, SystemMail } from './core/mail.js';
+import { ReviewService } from './core/review.js';
+import { SearchService } from './core/search.js';
 import { ModuleManager } from './core/modules.js';
 import { authRoutes } from './core/routes/auth.js';
 import { systemRoutes } from './core/routes/system.js';
 import { SettingsService } from './core/settings.js';
 import { SITE_SETTINGS, SiteService } from './core/site.js';
 import { UserService } from './core/users.js';
-import { authenticate, identify } from './middleware/auth.js';
+import { authenticate, identify, isAuthor } from './middleware/auth.js';
+import { forbidden } from './lib/errors.js';
 import { randomToken } from './lib/security.js';
 import { errorHandler, notFoundHandler } from './middleware/errors.js';
 import { builtinModules } from './modules/index.js';
@@ -25,8 +33,17 @@ export async function createCms({ db, config, mailer, logger = console, modules:
   const content = new ContentService({ db, hooks, isEnabled });
   const site = new SiteService({ config, settings, hooks, content, logger });
   const users = new UserService(db, config);
+  const i18n = new I18n(settings);
+  site.i18n = i18n;
+
+  const audit = new AuditLog(db);
+  const systemMail = new SystemMail({ mailer, settings, logger });
 
   settings.register('core', SITE_SETTINGS.defaults, SITE_SETTINGS.rules);
+  settings.register('core', MAIL_SETTINGS.defaults, MAIL_SETTINGS.rules);
+  settings.register('core', BACKUP_SETTINGS.defaults, BACKUP_SETTINGS.rules);
+  settings.register('core', CACHE_SETTINGS.defaults, CACHE_SETTINGS.rules);
+  settings.register('core', I18N_SETTINGS.defaults, I18N_SETTINGS.rules);
   for (const mod of moduleList) manager.add(mod);
   await manager.loadDirectory(config.modulesDir);
   manager.resolve();
@@ -35,10 +52,17 @@ export async function createCms({ db, config, mailer, logger = console, modules:
   await site.loadTheme(config.theme);
 
   // Gemeinsamer Kontext; Module hängen ihre Services direkt an (z. B. ctx.subscribers).
-  const ctx = { db, config, mailer, logger, settings, hooks, content, site, users, modules: manager };
+  const backups = new BackupService({ db, config, settings, modules: manager, logger });
+  const search = new SearchService({ db, hooks });
+  const cache = new PageCache(settings);
+  const review = new ReviewService({ db, config, systemMail, logger });
+  const ctx = { db, config, mailer, logger, settings, hooks, content, site, users, audit, systemMail, backups, search, cache, review, i18n, modules: manager };
+  site.search = search;
   // Einmaliger Einrichtungscode: ohne ihn kann niemand das erste Administratorkonto anlegen.
   ctx.setupToken = config.setupToken || randomToken(12);
   manager.setup(ctx);
+  // Suchindex beim ersten Start (oder nach einem Update ohne Index) aufbauen
+  if (search.isEmpty()) search.rebuild();
 
   const app = express();
   app.disable('x-powered-by');
@@ -64,15 +88,29 @@ export async function createCms({ db, config, mailer, logger = console, modules:
     if (req.path.startsWith('/media') && req.method === 'POST') return next();
     return (req.path.startsWith('/subscribers/import') ? parsers.import : parsers.user)(req, res, next);
   });
+  api.use(auditMiddleware(audit));
+  // Jede erfolgreiche Änderung leert den Seiten-Cache der Website
+  api.use((req, res, next) => {
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) res.on('finish', () => res.statusCode < 400 && req.auth && cache.clear());
+    next();
+  });
   api.use('/auth', authRoutes(ctx, auth));
   for (const router of manager.mount('publicApi', ctx)) api.use(router);
   api.use(auth);
   api.use(systemRoutes(ctx));
   for (const router of manager.mount('api', ctx)) api.use(router);
+  // Autoren werden an Modulen ohne Autorenzugang vorbeigeleitet → 403 statt 404
+  api.use((req, res, next) => next(isAuthor(req) ? forbidden('Diese Funktion ist der Redaktion vorbehalten') : undefined));
   api.use(notFoundHandler);
   app.use('/api', api);
 
-  // Öffentliche Website: Modulrouten, Kernrouten, dann Fallbacks (z. B. Seiten-Slugs)
+  // Öffentliche Website: Sprache (/en/…), Besuch melden (Statistik), Cache, Modulrouten, Kernrouten, Fallbacks
+  app.use(i18n.middleware());
+  app.use((req, res, next) => {
+    if (req.method === 'GET') res.on('finish', () => hooks.emit('site.pageview', req, res));
+    next();
+  });
+  app.use(cache.middleware());
   for (const router of manager.mount('publicRoutes', ctx)) app.use(router);
   app.use(site.routes());
   for (const router of manager.mount('fallbackRoutes', ctx)) app.use(router);

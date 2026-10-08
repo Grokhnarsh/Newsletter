@@ -1,5 +1,6 @@
 // Admin-Oberfläche des Medien-Moduls
-import { ApiError, del, get, put, session } from '/admin/js/api.js';
+import { ApiError, CSRF_HEADERS, del, get, post, put } from '/admin/js/api.js';
+import { ctx } from '/admin/js/state.js';
 import { $, confirmDialog, debounce, fmtDateTime, fmtNum, html, modal, pager, setHtml, toast, toastError } from '/admin/js/ui.js';
 
 const ACCEPT = 'image/jpeg,image/png,image/gif,image/webp,application/pdf,video/mp4,audio/mpeg';
@@ -11,9 +12,8 @@ function fmtSize(bytes) {
 }
 
 async function upload(file) {
-  const headers = { 'Content-Type': file.type || 'application/octet-stream', 'X-Filename': encodeURIComponent(file.name) };
-  if (session.token) headers.Authorization = `Bearer ${session.token}`;
-  const res = await fetch('/api/media', { method: 'POST', headers, body: file });
+  const headers = { ...CSRF_HEADERS, 'Content-Type': file.type || 'application/octet-stream', 'X-Filename': encodeURIComponent(file.name) };
+  const res = await fetch('/api/media', { method: 'POST', headers, credentials: 'same-origin', body: file });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new ApiError(res.status, `${file.name}: ${data.error || `Fehler ${res.status}`}`);
   return data;
@@ -85,6 +85,7 @@ function detailDialog(m, onChange) {
         <dl class="summary-list small" style="margin-bottom:16px">
           <dt>Typ</dt><dd>${m.mime}</dd>
           <dt>Größe</dt><dd>${fmtSize(m.size)}${m.width ? ` · ${m.width} × ${m.height} px` : ''}</dd>
+          ${m.variants?.length ? html`<dt>Varianten</dt><dd>${m.variants.map((v) => `${v.width} px`).join(', ')} (WebP, automatisch für Smartphones und Tablets)</dd>` : ''}
           <dt>Hochgeladen</dt><dd>${fmtDateTime(m.created_at)}</dd>
           <dt>URL</dt><dd><a href="${m.url}" target="_blank" rel="noopener">${m.url}</a></dd>
         </dl>
@@ -119,7 +120,8 @@ async function mediaView(el) {
   const state = { q: '', type: '', page: 1 };
   setHtml(
     el,
-    html`<div class="page-head"><div><h1>Medien</h1><div class="sub">Bilder und Dateien für Seiten, Beiträge und Newsletter</div></div></div>
+    html`<div class="page-head"><div><h1>Medien</h1><div class="sub">Bilder und Dateien für Seiten, Beiträge und Newsletter</div></div>
+        <div class="toolbar">${ctx.isAuthor ? '' : html`<button class="btn" id="optimize" title="WebP-Varianten für ältere Bilder erzeugen">Bilder optimieren</button>`}</div></div>
       <div class="card">
         ${dropzoneHtml}
         <div class="toolbar" style="margin-bottom:12px">
@@ -148,6 +150,18 @@ async function mediaView(el) {
   $('#grid', el).addEventListener('click', (e) => {
     const item = e.target.closest('[data-id]');
     if (item) detailDialog(items.find((m) => m.id === Number(item.dataset.id)), load);
+  });
+  $('#optimize', el)?.addEventListener('click', async (e) => {
+    e.target.disabled = true;
+    try {
+      const r = await post('/media/optimize');
+      toast(r.available ? `${r.optimized} von ${r.checked} Bildern optimiert` : 'Bildoptimierung nicht verfügbar (Paket „sharp“ fehlt)', r.available ? 'ok' : 'error');
+      load();
+    } catch (err) {
+      toastError(err);
+    } finally {
+      e.target.disabled = false;
+    }
   });
   $('#q', el).addEventListener('input', debounce((e) => ((state.q = e.target.value.trim()), (state.page = 1), load())));
   $('#type', el).addEventListener('change', (e) => ((state.type = e.target.value), (state.page = 1), load()));

@@ -9,20 +9,34 @@ const LOCATIONS = { main: 'Hauptmenü', footer: 'Fußzeile' };
 const TYPES = ['custom', 'page', 'blog', 'home'];
 
 export class MenuService {
-  constructor({ db, hooks }) {
+  constructor({ db, hooks, i18n }) {
     this.db = db;
     this.hooks = hooks;
+    this.i18n = i18n;
+  }
+
+  /**
+   * Menübereiche: je Bereich ein Menü der Standardsprache und optional eines je
+   * weiterer Sprache („main:en“). Leere Sprachmenüs übernehmen das Standardmenü.
+   */
+  locations() {
+    const out = Object.entries(LOCATIONS).map(([location, label]) => ({ location, label, lang: null }));
+    for (const lang of this.i18n?.languages().slice(1) || []) {
+      for (const [location, label] of Object.entries(LOCATIONS)) out.push({ location: `${location}:${lang}`, label: `${label} (${this.i18n.label(lang)})`, lang });
+    }
+    return out;
   }
 
   list() {
-    return Object.entries(LOCATIONS).map(([location, label]) => ({ location, label, items: this.items(location) }));
+    return this.locations().map((l) => ({ ...l, items: this.items(l.location) }));
   }
 
   menuId(location) {
-    if (!LOCATIONS[location]) throw notFound('Unbekannter Menübereich');
+    const loc = this.locations().find((l) => l.location === location);
+    if (!loc) throw notFound('Unbekannter Menübereich');
     let row = this.db.get('SELECT id FROM menus WHERE location = ?', location);
     if (!row) {
-      const { lastInsertRowid } = this.db.run('INSERT INTO menus (location, name, updated_at) VALUES (?, ?, ?)', location, LOCATIONS[location], now());
+      const { lastInsertRowid } = this.db.run('INSERT INTO menus (location, name, updated_at) VALUES (?, ?, ?)', location, loc.label, now());
       row = { id: lastInsertRowid };
     }
     return row.id;
@@ -75,16 +89,23 @@ export class MenuService {
     return this.items(location);
   }
 
-  /** Aufgelöste Einträge für das Theme; nicht (mehr) verfügbare Ziele entfallen. */
-  resolved(location) {
+  /**
+   * Aufgelöste Einträge für das Theme; nicht (mehr) verfügbare Ziele entfallen.
+   * Ohne eigenes Sprachmenü wird das Standardmenü verwendet – Seiten-Einträge
+   * zeigen dann auf die Übersetzung in der jeweiligen Sprache.
+   */
+  resolved(location, lang) {
+    const isDefault = !lang || !this.i18n || lang === this.i18n.defaultLang();
+    let items = isDefault ? [] : this.items(`${location}:${lang}`);
+    if (!items.length) items = this.items(location);
     const resolve = (item) => {
       let url = item.url;
-      if (item.type === 'home') url = '/';
-      else if (item.type !== 'custom') url = this.hooks.first('menus.resolve', item);
+      if (item.type === 'home') url = this.i18n ? this.i18n.path('/', lang) : '/';
+      else if (item.type !== 'custom') url = this.hooks.first('menus.resolve', item, lang);
       if (!url) return null;
       return { label: item.label, url, new_tab: item.new_tab, children: (item.children || []).map(resolve).filter(Boolean) };
     };
-    return this.items(location).map(resolve).filter(Boolean);
+    return items.map(resolve).filter(Boolean);
   }
 }
 
@@ -122,7 +143,7 @@ export default {
   setup(ctx) {
     ctx.menus = new MenuService(ctx);
     const opts = { module: 'menus' };
-    ctx.hooks.on('site.menu', (location) => (LOCATIONS[location] ? ctx.menus.resolved(location) : undefined), opts);
+    ctx.hooks.on('site.menu', (location, lang) => (LOCATIONS[location] ? ctx.menus.resolved(location, lang) : undefined), opts);
     ctx.hooks.on(
       'system.setup',
       () => {
@@ -131,6 +152,8 @@ export default {
         const about = ctx.modules.isEnabled('pages') && ctx.db.get("SELECT id FROM pages WHERE slug = 'ueber-uns' AND parent_id IS NULL");
         if (about) items.push({ type: 'page', label: 'Über uns', target_id: about.id });
         if (ctx.modules.isEnabled('blog')) items.push({ type: 'blog', label: 'Blog' });
+        const contact = ctx.modules.isEnabled('pages') && ctx.db.get("SELECT id FROM pages WHERE slug = 'kontakt' AND parent_id IS NULL");
+        if (contact) items.push({ type: 'page', label: 'Kontakt', target_id: contact.id });
         if (ctx.modules.isEnabled('newsletter')) items.push({ type: 'custom', label: 'Newsletter', url: '/subscribe' });
         ctx.menus.replace('main', items);
         const footer = [];
