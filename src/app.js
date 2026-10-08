@@ -1,6 +1,7 @@
 import path from 'node:path';
 import express from 'express';
 import { AuditLog, auditMiddleware } from './core/audit.js';
+import { BACKUP_SETTINGS, BackupService } from './core/backup.js';
 import { ContentService } from './core/content.js';
 import { HookBus } from './core/hooks.js';
 import { MAIL_SETTINGS, SystemMail } from './core/mail.js';
@@ -33,6 +34,7 @@ export async function createCms({ db, config, mailer, logger = console, modules:
 
   settings.register('core', SITE_SETTINGS.defaults, SITE_SETTINGS.rules);
   settings.register('core', MAIL_SETTINGS.defaults, MAIL_SETTINGS.rules);
+  settings.register('core', BACKUP_SETTINGS.defaults, BACKUP_SETTINGS.rules);
   for (const mod of moduleList) manager.add(mod);
   await manager.loadDirectory(config.modulesDir);
   manager.resolve();
@@ -41,7 +43,8 @@ export async function createCms({ db, config, mailer, logger = console, modules:
   await site.loadTheme(config.theme);
 
   // Gemeinsamer Kontext; Module hängen ihre Services direkt an (z. B. ctx.subscribers).
-  const ctx = { db, config, mailer, logger, settings, hooks, content, site, users, audit, systemMail, modules: manager };
+  const backups = new BackupService({ db, config, settings, modules: manager, logger });
+  const ctx = { db, config, mailer, logger, settings, hooks, content, site, users, audit, systemMail, backups, modules: manager };
   // Einmaliger Einrichtungscode: ohne ihn kann niemand das erste Administratorkonto anlegen.
   ctx.setupToken = config.setupToken || randomToken(12);
   manager.setup(ctx);

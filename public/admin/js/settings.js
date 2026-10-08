@@ -8,6 +8,7 @@ const CORE_TABS = [
   { id: 'modules', label: 'Module', order: 80, adminOnly: true, render: modulesTab },
   { id: 'users', label: 'Benutzer', order: 90, adminOnly: true, render: usersTab },
   { id: 'api', label: 'API', order: 95, adminOnly: true, render: apiTab },
+  { id: 'backup', label: 'Backup', order: 96, adminOnly: true, render: backupTab },
   { id: 'audit', label: 'Protokoll', order: 97, adminOnly: true, render: auditTab },
 ];
 
@@ -239,6 +240,65 @@ async function usersTab(box) {
       }
     }),
   );
+}
+
+const fmtBytes = (n) => (n < 1048576 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1048576).toFixed(1).replace('.', ',')} MB`);
+
+async function backupTab(box) {
+  const [list, s] = await Promise.all([get('/system/backups'), ctx.getSettings(true)]);
+  setHtml(
+    box,
+    html`<div class="card">
+      <div class="card-head"><h2>Backup</h2>
+        <div class="toolbar"><a class="btn" href="/api/system/backup" id="dl-now">Jetzt herunterladen</a><button class="btn btn-primary" id="create">Auf dem Server sichern</button></div></div>
+      <p class="muted">Ein Backup enthält die komplette Datenbank (Inhalte, Abonnenten, Einstellungen, Benutzer) und alle hochgeladenen Dateien als ZIP.
+      Wiederherstellen bei gestopptem Server mit <code>npm run restore -- &lt;datei.zip&gt;</code>.</p>
+      <div class="table-wrap"><table><thead><tr><th>Datei</th><th>Erstellt</th><th class="right">Größe</th><th></th></tr></thead><tbody>${
+        list.length
+          ? list.map(
+              (b) => html`<tr><td><code>${b.name}</code></td><td class="small">${fmtDateTime(b.created_at)}</td><td class="right num">${fmtBytes(b.size)}</td>
+                <td class="right nowrap"><a class="btn btn-sm" href="/api/system/backups/${b.name}">Herunterladen</a><button class="btn btn-sm btn-ghost" data-del="${b.name}" aria-label="Löschen">🗑</button></td></tr>`,
+            )
+          : html`<tr><td colspan="4" class="empty">Noch keine Backups auf dem Server.</td></tr>`
+      }</tbody></table></div>
+    </div>
+    <form class="card" id="backup-settings">
+      <h2>Automatische Backups</h2>
+      <div class="inline-fields">
+        <div class="field"><label for="b-int">Abstand in Stunden</label><input id="b-int" name="backup_interval_hours" type="number" min="0" max="720" value="${s.backup_interval_hours}"><div class="help">0 = aus, 24 = täglich</div></div>
+        <div class="field"><label for="b-keep">Anzahl aufbewahren</label><input id="b-keep" name="backup_keep" type="number" min="1" max="100" value="${s.backup_keep}"></div>
+      </div>
+      <p class="muted small">Gespeichert im Ordner <code>BACKUPS_DIR</code> (Standard <code>data/backups</code>). Bewahre Kopien zusätzlich außerhalb des Servers auf.</p>
+      <button class="btn btn-primary" type="submit">Speichern</button>
+    </form>`,
+  );
+  $('#create', box).addEventListener('click', async (e) => {
+    e.target.disabled = true;
+    try {
+      await post('/system/backups');
+      toast('Backup erstellt');
+      backupTab(box);
+    } catch (err) {
+      toastError(err);
+      e.target.disabled = false;
+    }
+  });
+  $$('[data-del]', box).forEach((b) =>
+    b.addEventListener('click', async () => {
+      if (!(await confirmDialog('Backup löschen', `${b.dataset.del} löschen?`, { submitLabel: 'Löschen' }))) return;
+      await del(`/system/backups/${b.dataset.del}`);
+      backupTab(box);
+    }),
+  );
+  $('#backup-settings', box).addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const d = formData(e.target);
+    try {
+      await saveSettings({ backup_interval_hours: Number(d.backup_interval_hours), backup_keep: Number(d.backup_keep) });
+    } catch (err) {
+      toastError(err);
+    }
+  });
 }
 
 // Lesbare Beschreibung eines Protokolleintrags

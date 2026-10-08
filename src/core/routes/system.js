@@ -7,7 +7,7 @@ import { ROLES } from '../users.js';
 
 /** Systemrouten des Kerns: Module, Benutzer, API-Schlüssel, Einstellungen. */
 export function systemRoutes(ctx) {
-  const { users, settings, modules, content, mailer, hooks, audit, systemMail, config } = ctx;
+  const { users, settings, modules, content, mailer, hooks, audit, systemMail, config, backups } = ctx;
   const router = Router();
 
   // ---- Module ----
@@ -84,6 +84,33 @@ ${systemMail.button(url, 'Passwort festlegen')}
   router.post('/users/:id/send-reset', requireAdmin, async (req, res) => {
     await sendAccessLink(users.find(parseId(req.params.id)));
     res.json({ ok: true });
+  });
+
+  // ---- Backups ----
+  router.get('/system/backups', requireAdmin, (req, res) => res.json(backups.list()));
+
+  router.post('/system/backups', requireAdmin, async (req, res) => {
+    res.status(201).json(await backups.createFile());
+  });
+
+  // Direkter Download eines frischen Backups (ohne Speichern auf dem Server)
+  router.get('/system/backup', requireAdmin, async (req, res) => {
+    res.set('Content-Type', 'application/zip');
+    res.set('Content-Disposition', `attachment; filename="${backups.fileName()}"`);
+    audit.log(req, 'backup_download', 'live');
+    await backups.write(res);
+    res.end();
+  });
+
+  router.get('/system/backups/:name', requireAdmin, (req, res) => {
+    const file = backups.pathFor(req.params.name);
+    audit.log(req, 'backup_download', req.params.name);
+    res.download(file, req.params.name);
+  });
+
+  router.delete('/system/backups/:name', requireAdmin, (req, res) => {
+    backups.remove(req.params.name);
+    res.status(204).end();
   });
 
   // ---- Änderungsprotokoll ----

@@ -27,9 +27,11 @@ const server = app.listen(config.port, config.host, () => {
 });
 
 await ctx.modules.start(ctx);
+ctx.backups.start();
 
 async function shutdown(signal) {
   console.log(`${signal} empfangen – fahre herunter …`);
+  ctx.backups.stop();
   await ctx.modules.stop(ctx);
   server.close(() => {
     mailer.close();
