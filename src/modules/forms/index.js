@@ -342,7 +342,7 @@ export default {
         if (String(req?.query?.formular) === String(f.id)) {
           return `<div class="form-success" id="form-${f.id}" role="status"><p>${escapeHtml(f.success_message)}</p></div>`;
         }
-        return renderForm(ctx, f, { page: req?.path || '' });
+        return renderForm(ctx, f, { page: req?.originalUrl?.split('?')[0] || req?.path || '' });
       },
       { module: 'forms', description: 'Formular einbinden', example: '[form id="1"]' },
     );

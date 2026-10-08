@@ -56,7 +56,7 @@ export async function segmentEditorView(el, id) {
   const [fields, lists, segment] = await Promise.all([
     get('/segments/fields'),
     ctx.getLists(true),
-    isNew ? { name: '', match: 'all', rules: [{ field: 'attribute', key: '', op: 'equals', value: '' }] } : get(`/segments/${id}`),
+    isNew ? { name: '', match: 'all', rules: [{ field: 'email', op: 'ends_with', value: '' }] } : get(`/segments/${id}`),
   ]);
   const fieldType = Object.fromEntries(fields.map((f) => [f.key, f.type]));
   let rules = segment.rules.map((r) => ({ ...r }));
@@ -112,6 +112,12 @@ export async function segmentEditorView(el, id) {
   );
 
   const refresh = debounce(async () => {
+    // Unvollständige Regeln nicht an den Server schicken
+    if (rules.some((r) => fieldType[r.field] === 'attribute' && !String(r.key || '').trim())) {
+      setText($('#count', el), '–');
+      setHtml($('#sample', el), html`<li class="muted">Bitte den Namen des eigenen Feldes angeben.</li>`);
+      return;
+    }
     try {
       const r = await post('/segments/preview', { match: $('#sg-match', el).value, rules });
       setText($('#count', el), fmtNum(r.count));
