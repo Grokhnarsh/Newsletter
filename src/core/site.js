@@ -93,6 +93,7 @@ export class SiteService {
   }
 
   notFound(req, res) {
+    if (req.method === 'GET') this.hooks.collect('site.not_found', req);
     this.send(req, res, {
       title: 'Seite nicht gefunden',
       status: 404,

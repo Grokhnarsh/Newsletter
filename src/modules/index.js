@@ -5,5 +5,7 @@ import media from './media/index.js';
 import menus from './menus/index.js';
 import newsletter from './newsletter/index.js';
 import pages from './pages/index.js';
+import redirects from './redirects/index.js';
 
-export const builtinModules = [media, pages, blog, menus, newsletter];
+// Reihenfolge zählt für Fallback-Routen: erst Seiten, dann Weiterleitungen.
+export const builtinModules = [media, pages, blog, menus, redirects, newsletter];

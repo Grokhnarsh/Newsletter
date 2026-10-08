@@ -26,8 +26,8 @@ const postSchema = {
 const PUBLISHED = "p.status = 'published' AND p.published_at <= ?";
 
 export class PostService {
-  constructor({ db, content, settings, site }) {
-    Object.assign(this, { db, content, settings, site });
+  constructor({ db, content, settings, site, hooks }) {
+    Object.assign(this, { db, content, settings, site, hooks });
   }
 
   publicUrl(post, absolute = true) {
@@ -152,6 +152,16 @@ export class PostService {
 
   update(id, data, userId) {
     const existing = this.find(id);
+    const post = this.updateRow(existing, data, userId);
+    // Neue Adresse eines veröffentlichten Beitrags melden (automatische Weiterleitung)
+    if (existing.status === 'published' && post.status === 'published' && post.slug !== existing.slug) {
+      this.hooks.collect('content.moved', [{ from: this.publicUrl(existing, false), to: this.publicUrl(post, false) }]);
+    }
+    return post;
+  }
+
+  updateRow(existing, data, userId) {
+    const id = existing.id;
     const d = this.normalize(data, existing);
     return this.db.transaction(() => {
       if (d.content !== undefined && d.content !== existing.content) {
@@ -196,8 +206,10 @@ export class PostService {
     if (!s) throw badRequest('Validierung fehlgeschlagen', { slug: 'Ungültiger Slug' });
     if (this.db.get('SELECT id FROM categories WHERE slug = ? AND id != ?', s, id ?? 0)) throw conflict('Kategorie-Slug bereits vergeben');
     if (id) {
-      if (!this.db.get('SELECT 1 FROM categories WHERE id = ?', id)) throw notFound('Kategorie nicht gefunden');
+      const old = this.db.get('SELECT slug FROM categories WHERE id = ?', id);
+      if (!old) throw notFound('Kategorie nicht gefunden');
       this.db.run('UPDATE categories SET name = ?, slug = ?, description = ? WHERE id = ?', name, s, description || '', id);
+      if (old.slug !== s) this.hooks.collect('content.moved', [{ from: `/blog/kategorie/${old.slug}`, to: `/blog/kategorie/${s}` }]);
       return this.db.get('SELECT * FROM categories WHERE id = ?', id);
     }
     const { lastInsertRowid } = this.db.run('INSERT INTO categories (name, slug, description) VALUES (?, ?, ?)', name, s, description || '');

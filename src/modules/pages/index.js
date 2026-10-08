@@ -165,7 +165,30 @@ export class PageService {
     return this.find(id);
   }
 
+  /** Pfade aller veröffentlichten Seiten (id → Pfad), um Verschiebungen zu erkennen. */
+  publishedPaths() {
+    return new Map(this.tree().filter((p) => p.status === 'published').map((p) => [p.id, p.path]));
+  }
+
+  /** Meldet geänderte Adressen veröffentlichter Seiten (z. B. für automatische Weiterleitungen). */
+  reportMoves(before) {
+    const after = this.publishedPaths();
+    const moves = [];
+    for (const [id, from] of before) {
+      const to = after.get(id);
+      if (to && to !== from) moves.push({ from, to });
+    }
+    if (moves.length) this.hooks.collect('content.moved', moves);
+  }
+
   update(id, data, userId) {
+    const before = this.publishedPaths();
+    const page = this.updateRow(id, data, userId);
+    this.reportMoves(before);
+    return page;
+  }
+
+  updateRow(id, data, userId) {
     const existing = this.find(id);
     const d = this.normalize(data, existing);
     return this.db.transaction(() => {
@@ -193,12 +216,15 @@ export class PageService {
 
   remove(id) {
     const page = this.find(id);
+    const before = this.publishedPaths();
     this.db.transaction(() => {
       // Unterseiten rücken eine Ebene nach oben
       this.db.run('UPDATE pages SET parent_id = ? WHERE parent_id = ?', page.parent_id, id);
       this.db.run('DELETE FROM pages WHERE id = ?', id);
       this.content.deleteRevisions('page', id);
     });
+    before.delete(id);
+    this.reportMoves(before);
   }
 
   search(q) {
