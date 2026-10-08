@@ -214,3 +214,65 @@ export function makeReadOnly(root, form, editor) {
   editor.setReadOnly();
   for (const sel of ['#save', '#delete', '[data-pick-cover]', '[data-clear-cover]', '[data-rev-restore]']) root.querySelectorAll(sel).forEach((b) => b.remove());
 }
+
+const LANGUAGE_NAMES = { de: 'Deutsch', en: 'English', fr: 'Français', es: 'Español', it: 'Italiano', nl: 'Nederlands', pl: 'Polski', pt: 'Português' };
+export const languageName = (code) => LANGUAGE_NAMES[code] || String(code).toUpperCase();
+
+/** Konfigurierte Sprachen der Website (erste = Standard). */
+export async function siteLanguages() {
+  const s = await ctx.getSettings();
+  return String(s.site_languages || 'de').split(',').map((l) => l.trim()).filter(Boolean);
+}
+
+/** Kleines Sprachkürzel für Listen (nur bei mehrsprachigen Websites). */
+export function langBadge(lang, langs) {
+  return langs.length > 1 ? html`<span class="badge badge-muted" title="${languageName(lang)}">${String(lang || langs[0]).toUpperCase()}</span>` : '';
+}
+
+/** Seitenleiste „Sprache & Übersetzungen“ im Editor. */
+export function languageCard(item, isNew, langs, editPrefix) {
+  if (langs.length < 2) return '';
+  const current = item.lang || langs[0];
+  const translations = new Map((item.translations || []).filter((t) => t.id !== item.id).map((t) => [t.lang, t]));
+  return html`<div class="card side-card">
+    <h3>Sprache</h3>
+    <div class="field"><label for="c-lang">Sprache dieses Inhalts</label><select id="c-lang" name="lang">${langs.map(
+      (l) => html`<option value="${l}" ${l === current ? raw('selected') : ''}>${languageName(l)}</option>`,
+    )}</select></div>
+    ${
+      isNew
+        ? html`<p class="muted small">Übersetzungen kannst du nach dem ersten Speichern anlegen.</p>`
+        : html`<div class="small">${langs
+            .filter((l) => l !== current)
+            .map((l) => {
+              const t = translations.get(l);
+              return html`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border)">
+                <span>${languageName(l)}</span>
+                ${
+                  t
+                    ? html`<span><a href="#${editPrefix}/${t.id}">${t.title}</a> ${statusBadge(t.status)}</span>`
+                    : html`<button type="button" class="btn btn-sm" data-translate="${l}">Übersetzung anlegen</button>`
+                }</div>`;
+            })}</div>`
+    }
+  </div>`;
+}
+
+/** „Übersetzung anlegen“: kopiert den Inhalt als Entwurf in die Zielsprache und öffnet ihn. */
+export function bindTranslations(root, base, editPrefix, { save } = {}) {
+  root.querySelectorAll('[data-translate]').forEach((b) =>
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      try {
+        if (save && (await save()) === false) return;
+        const created = await post(`${base}/translate`, { lang: b.dataset.translate });
+        toast(`Übersetzung (${languageName(b.dataset.translate)}) als Entwurf angelegt – Inhalt jetzt übersetzen`);
+        location.hash = `#${editPrefix}/${created.id}`;
+      } catch (err) {
+        toastError(err);
+      } finally {
+        b.disabled = false;
+      }
+    }),
+  );
+}

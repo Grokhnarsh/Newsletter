@@ -67,12 +67,17 @@ p { margin: 0 0 1em; }
 .header-search { margin-left: auto; }
 .site-header .header-search input { width: 180px; padding: 7px 12px; border: 1px solid var(--border); border-radius: 999px; background: var(--bg); color: var(--text); font: inherit; font-size: 0.9rem; }
 .nav-toggle { display: none; }
+.lang-switch ul { list-style: none; margin: 0; padding: 0; display: flex; gap: 2px; }
+.lang-switch a { display: block; padding: 6px 8px; border-radius: 6px; color: var(--text-2); text-decoration: none; font-size: 0.85rem; font-weight: 600; }
+.lang-switch a:hover { color: var(--text); background: var(--surface-2); }
+.lang-switch a[aria-current] { color: var(--accent); }
 .nav-toggle summary { list-style: none; cursor: pointer; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; font-weight: 600; }
 .nav-toggle summary::-webkit-details-marker { display: none; }
 
 @media (max-width: 820px) {
   .main-nav.desktop, .header-search { display: none; }
   .nav-toggle { display: block; margin-left: auto; }
+  .lang-switch { order: 3; }
   .nav-toggle .main-nav { position: absolute; left: 0; right: 0; top: 100%; background: var(--surface); border-bottom: 1px solid var(--border); padding: 8px 20px 16px; }
   .nav-toggle .main-nav ul { flex-direction: column; }
   .main-nav .submenu { display: flex; position: static; border: 0; box-shadow: none; padding: 0 0 0 16px; }

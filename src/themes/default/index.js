@@ -2,8 +2,19 @@
  * Standard-Theme. Ein Theme exportiert `layout(view)` und liefert seine
  * statischen Dateien aus `assets/` (unter /theme/ erreichbar).
  * Alle Werte in `view` sind unescaped – außer `content`, `head` und `widgets`,
- * die bereits fertiges HTML enthalten.
+ * die bereits fertiges HTML enthalten. Mehrsprachig: `lang`, `languages`
+ * (Sprachumschalter), `t(key)` für Texte des Themes, `homeUrl`, `searchUrl`.
  */
+
+function languageSwitcher(v, e) {
+  if (!v.languages?.length) return '';
+  return `<nav class="lang-switch" aria-label="${e(v.t('language'))}"><ul>${v.languages
+    .map(
+      (l) =>
+        `<li><a href="${e(l.url)}" hreflang="${e(l.code)}" lang="${e(l.code)}"${l.current ? ' aria-current="true"' : ''} title="${e(l.label)}">${e(l.code.toUpperCase())}</a></li>`,
+    )
+    .join('')}</ul></nav>`;
+}
 
 function menuHtml(items, e, currentPath, depth = 0) {
   if (!items?.length) return '';
@@ -28,11 +39,11 @@ export default {
       : `<span class="brand-name">${e(v.site.name)}</span>`;
     const footerLinks = [
       ...(v.menus.footer || []),
-      ...(v.site.imprintUrl ? [{ label: 'Impressum', url: v.site.imprintUrl }] : []),
-      ...(v.site.privacyUrl ? [{ label: 'Datenschutz', url: v.site.privacyUrl }] : []),
+      ...(v.site.imprintUrl ? [{ label: v.t('imprint'), url: v.site.imprintUrl }] : []),
+      ...(v.site.privacyUrl ? [{ label: v.t('privacy'), url: v.site.privacyUrl }] : []),
     ];
     return `<!DOCTYPE html>
-<html lang="de">
+<html lang="${e(v.lang || 'de')}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -51,17 +62,18 @@ ${v.image ? `<meta property="og:image" content="${e(v.image)}"><meta name="twitt
 ${v.head}
 </head>
 <body class="${e(v.bodyClass)}${v.isHome ? ' home' : ''}">
-<a class="skip" href="#main">Zum Inhalt springen</a>
+<a class="skip" href="#main">${e(v.t('skip'))}</a>
 <header class="site-header">
   <div class="wrap header-inner">
-    <a class="brand" href="/">${brand}</a>
+    <a class="brand" href="${e(v.homeUrl || '/')}">${brand}</a>
     ${
       v.menus.main?.length
-        ? `<details class="nav-toggle"><summary aria-label="Menü">Menü</summary><nav class="main-nav" aria-label="Hauptmenü">${menuHtml(v.menus.main, e, v.currentPath)}</nav></details>
-    <nav class="main-nav desktop" aria-label="Hauptmenü">${menuHtml(v.menus.main, e, v.currentPath)}</nav>`
+        ? `<details class="nav-toggle"><summary aria-label="${e(v.t('menu'))}">${e(v.t('menu'))}</summary><nav class="main-nav" aria-label="${e(v.t('mainNav'))}">${menuHtml(v.menus.main, e, v.currentPath)}</nav></details>
+    <nav class="main-nav desktop" aria-label="${e(v.t('mainNav'))}">${menuHtml(v.menus.main, e, v.currentPath)}</nav>`
         : ''
     }
-    <form class="header-search" action="/suche" method="get" role="search"><input type="search" name="q" placeholder="Suchen …" aria-label="Website durchsuchen"></form>
+    <form class="header-search" action="${e(v.searchUrl || '/suche')}" method="get" role="search"><input type="search" name="q" placeholder="${e(v.t('search'))}" aria-label="${e(v.t('searchLabel'))}"></form>
+    ${languageSwitcher(v, e)}
   </div>
 </header>
 ${v.widgets.top ? `<div class="top-widgets">${v.widgets.top}</div>` : ''}
@@ -79,7 +91,7 @@ ${v.content}
   </div>
   <div class="wrap footer-bottom">
     <span>© ${v.site.year} ${e(v.site.name)}${v.site.footerText ? ` · ${e(v.site.footerText)}` : ''}</span>
-    ${footerLinks.length ? `<nav aria-label="Fußzeile">${menuHtml(footerLinks, e, v.currentPath)}</nav>` : ''}
+    ${footerLinks.length ? `<nav aria-label="${e(v.t('footerNav'))}">${menuHtml(footerLinks, e, v.currentPath)}</nav>` : ''}
   </div>
 </footer>
 </body>

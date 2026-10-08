@@ -65,6 +65,7 @@ async function menusView(el) {
       <div class="grid grid-2">${menus.map(
         (m) => html`<div class="card" data-menu="${m.location}">
           <div class="card-head"><h2>${m.label}</h2><button class="btn btn-sm" data-add>+ Eintrag</button></div>
+          ${m.lang ? html`<p class="muted small">Leer lassen, um das Menü der Standardsprache zu verwenden – Seiten zeigen dann automatisch auf ihre Übersetzung.</p>` : ''}
           <ul class="menu-items" data-list></ul>
           <div class="toolbar" style="margin-top:12px"><button class="btn btn-primary" data-save>Speichern</button><span class="muted small" data-dirty></span></div>
         </div>`,

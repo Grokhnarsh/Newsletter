@@ -5,6 +5,7 @@ import { BACKUP_SETTINGS, BackupService } from './core/backup.js';
 import { CACHE_SETTINGS, PageCache } from './core/cache.js';
 import { ContentService } from './core/content.js';
 import { HookBus } from './core/hooks.js';
+import { I18N_SETTINGS, I18n } from './core/i18n.js';
 import { MAIL_SETTINGS, SystemMail } from './core/mail.js';
 import { ReviewService } from './core/review.js';
 import { SearchService } from './core/search.js';
@@ -32,6 +33,8 @@ export async function createCms({ db, config, mailer, logger = console, modules:
   const content = new ContentService({ db, hooks, isEnabled });
   const site = new SiteService({ config, settings, hooks, content, logger });
   const users = new UserService(db, config);
+  const i18n = new I18n(settings);
+  site.i18n = i18n;
 
   const audit = new AuditLog(db);
   const systemMail = new SystemMail({ mailer, settings, logger });
@@ -40,6 +43,7 @@ export async function createCms({ db, config, mailer, logger = console, modules:
   settings.register('core', MAIL_SETTINGS.defaults, MAIL_SETTINGS.rules);
   settings.register('core', BACKUP_SETTINGS.defaults, BACKUP_SETTINGS.rules);
   settings.register('core', CACHE_SETTINGS.defaults, CACHE_SETTINGS.rules);
+  settings.register('core', I18N_SETTINGS.defaults, I18N_SETTINGS.rules);
   for (const mod of moduleList) manager.add(mod);
   await manager.loadDirectory(config.modulesDir);
   manager.resolve();
@@ -52,7 +56,7 @@ export async function createCms({ db, config, mailer, logger = console, modules:
   const search = new SearchService({ db, hooks });
   const cache = new PageCache(settings);
   const review = new ReviewService({ db, config, systemMail, logger });
-  const ctx = { db, config, mailer, logger, settings, hooks, content, site, users, audit, systemMail, backups, search, cache, review, modules: manager };
+  const ctx = { db, config, mailer, logger, settings, hooks, content, site, users, audit, systemMail, backups, search, cache, review, i18n, modules: manager };
   site.search = search;
   // Einmaliger Einrichtungscode: ohne ihn kann niemand das erste Administratorkonto anlegen.
   ctx.setupToken = config.setupToken || randomToken(12);
@@ -100,7 +104,8 @@ export async function createCms({ db, config, mailer, logger = console, modules:
   api.use(notFoundHandler);
   app.use('/api', api);
 
-  // Öffentliche Website: Besuch melden (Statistik), Cache, Modulrouten, Kernrouten, Fallbacks
+  // Öffentliche Website: Sprache (/en/…), Besuch melden (Statistik), Cache, Modulrouten, Kernrouten, Fallbacks
+  app.use(i18n.middleware());
   app.use((req, res, next) => {
     if (req.method === 'GET') res.on('finish', () => hooks.emit('site.pageview', req, res));
     next();

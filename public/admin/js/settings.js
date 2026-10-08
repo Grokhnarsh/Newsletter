@@ -35,6 +35,9 @@ export async function saveSettings(data) {
   return saved;
 }
 
+/** Konfigurierte Sprachen (erste = Standard). */
+export const languagesOf = (s) => String(s.site_languages || 'de').split(',').map((l) => l.trim()).filter(Boolean);
+
 async function websiteTab(box) {
   const s = await ctx.getSettings(true);
   const pages = registry.modules.some((m) => m.name === 'pages' && m.enabled) ? await get('/pages') : null;
@@ -47,11 +50,14 @@ async function websiteTab(box) {
         <div class="field"><label for="w-name">Name der Website</label><input id="w-name" name="site_name" type="text" value="${s.site_name}" required ${disabled}></div>
         <div class="field"><label for="w-tag">Untertitel / Slogan</label><input id="w-tag" name="site_tagline" type="text" value="${s.site_tagline}" ${disabled}></div>
         <div class="field"><label for="w-desc">Beschreibung (für Suchmaschinen)</label><textarea id="w-desc" name="site_description" style="min-height:70px" ${disabled}>${s.site_description}</textarea></div>
+        <div class="field"><label for="w-langs">Sprachen</label><input id="w-langs" name="site_languages" type="text" value="${s.site_languages}" placeholder="de, en" ${disabled}>
+          <div class="help">Sprachkürzel mit Komma getrennt. Die erste ist die Standardsprache, weitere erscheinen unter <code>/en/…</code> usw. mit Sprachumschalter.
+          Übersetzungen legst du im Editor von Seiten und Beiträgen an.</div></div>
         ${
           pages
             ? html`<div class="field"><label for="w-home">Startseite</label><select id="w-home" name="home_page_id" ${disabled}>
                 <option value="">${registry.modules.some((m) => m.name === 'blog' && m.enabled) ? 'Neueste Blogbeiträge' : 'Standard-Willkommensseite'}</option>
-                ${pages.filter((p) => p.status === 'published').map((p) => html`<option value="${p.id}" ${s.home_page_id === p.id ? raw('selected') : ''}>${'– '.repeat(p.depth)}${p.title}</option>`)}
+                ${pages.filter((p) => p.status === 'published' && p.lang === languagesOf(s)[0]).map((p) => html`<option value="${p.id}" ${s.home_page_id === p.id ? raw('selected') : ''}>${'– '.repeat(p.depth)}${p.title}</option>`)}
               </select><div class="help">Nur veröffentlichte Seiten sind wählbar.</div></div>`
             : ''
         }

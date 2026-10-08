@@ -10,7 +10,12 @@ import { pagination, parseId, SAFE_URL, validate } from '../../lib/validate.js';
 import { requireEditor } from '../../middleware/auth.js';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
-const dateFmt = new Intl.DateTimeFormat('de-DE', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Europe/Berlin' });
+const dateFormats = new Map();
+// Datumsformat passend zur Sprache des Beitrags
+function dateFmtFor(lang = 'de') {
+  if (!dateFormats.has(lang)) dateFormats.set(lang, new Intl.DateTimeFormat(lang, { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Europe/Berlin' }));
+  return dateFormats.get(lang);
+}
 
 const postSchema = {
   title: { type: 'string', required: true, max: 200 },
@@ -23,13 +28,49 @@ const postSchema = {
   seo_title: { type: 'string', max: 200 },
   seo_description: { type: 'string', max: 400 },
   category_ids: { type: 'ids' },
+  lang: { type: 'string', max: 2, pattern: /^([a-z]{2})?$/, patternMessage: 'Sprachkürzel, z. B. „en“' },
 };
 
 const PUBLISHED = "p.status = 'published' AND p.published_at <= ?";
 
 export class PostService {
-  constructor({ db, content, settings, site, hooks, search }) {
-    Object.assign(this, { db, content, settings, site, hooks, search });
+  constructor({ db, content, settings, site, hooks, search, i18n }) {
+    Object.assign(this, { db, content, settings, site, hooks, search, i18n });
+  }
+
+  langOf(post) {
+    return this.i18n ? this.i18n.langOf(post) : 'de';
+  }
+
+  /** Pfad in einer Sprache, z. B. ('/blog', 'en') → '/en/blog'. */
+  localPath(p, lang) {
+    return this.i18n ? this.i18n.path(p, lang) : p;
+  }
+
+  translations(post) {
+    const group = post.translation_of || post.id;
+    return this.db
+      .all('SELECT id, title, slug, status, published_at, lang, translation_of FROM posts WHERE id = ? OR translation_of = ? ORDER BY id', group, group)
+      .map((p) => ({ ...p, lang: this.langOf(p), url: this.publicUrl(p, false) }));
+  }
+
+  /** Übersetzung als Entwurf anlegen (Inhalt, Kategorien und Titelbild werden übernommen). */
+  translate(id, lang, userId) {
+    const post = this.find(id);
+    if (!this.i18n?.languages().includes(lang)) throw badRequest('Sprache ist nicht eingerichtet');
+    if (this.langOf(post) === lang) throw badRequest('Der Beitrag ist bereits in dieser Sprache');
+    const existing = this.translations(post).find((t) => t.lang === lang);
+    if (existing) throw conflict('Es gibt bereits eine Übersetzung in dieser Sprache', { id: existing.id });
+    // Beitragsadressen sind sprachübergreifend eindeutig
+    let slug = `${post.slug}-${lang}`;
+    for (let i = 2; this.db.get('SELECT 1 FROM posts WHERE slug = ?', slug); i++) slug = `${post.slug}-${lang}-${i}`;
+    return this.create(
+      {
+        title: post.title, slug, excerpt: post.excerpt, content: post.content, cover_url: post.cover_url, seo_title: post.seo_title,
+        seo_description: post.seo_description, category_ids: post.category_ids, status: 'draft', lang, translation_of: post.translation_of || post.id,
+      },
+      userId,
+    );
   }
 
   searchDocument(p) {
@@ -44,7 +85,7 @@ export class PostService {
   }
 
   publicUrl(post, absolute = true) {
-    const p = `/blog/${post.slug}`;
+    const p = this.localPath(`/blog/${post.slug}`, this.langOf(post));
     return absolute ? this.site.url(p) : p;
   }
 
@@ -56,7 +97,7 @@ export class PostService {
   }
 
   /** Liste für die Verwaltung (alle Status). */
-  list({ q, status, category_id, author_id }, { page, perPage, offset }) {
+  list({ q, status, category_id, author_id, lang }, { page, perPage, offset }) {
     const where = [];
     const params = [];
     if (q) {
@@ -72,6 +113,11 @@ export class PostService {
       where.push('p.status = ?');
       params.push(status);
     }
+    if (lang && this.i18n) {
+      const l = this.i18n.where(lang, 'p.lang');
+      where.push(l.sql);
+      params.push(...l.params);
+    }
     if (author_id) {
       where.push('p.author_id = ?');
       params.push(Number(author_id));
@@ -84,14 +130,14 @@ export class PostService {
     const total = this.db.get(`SELECT COUNT(*) AS n FROM posts p ${sql}`, ...params).n;
     const items = this.db
       .all(
-        `SELECT p.id, p.title, p.slug, p.status, p.published_at, p.updated_at, p.cover_url, p.author_id, p.review_requested_at, u.email AS author
+        `SELECT p.id, p.title, p.slug, p.status, p.published_at, p.updated_at, p.cover_url, p.author_id, p.review_requested_at, p.lang, p.translation_of, u.email AS author
          FROM posts p LEFT JOIN users u ON u.id = p.author_id ${sql}
          ORDER BY COALESCE(p.published_at, p.updated_at) DESC, p.id DESC LIMIT ? OFFSET ?`,
         ...params,
         perPage,
         offset,
       )
-      .map((p) => ({ ...p, categories: this.categoriesFor(p.id), scheduled: p.status === 'published' && p.published_at > now() }));
+      .map((p) => ({ ...p, lang: this.langOf(p), categories: this.categoriesFor(p.id), scheduled: p.status === 'published' && p.published_at > now() }));
     return { items, total, page, per_page: perPage, pages: Math.max(1, Math.ceil(total / perPage)) };
   }
 
@@ -107,12 +153,18 @@ export class PostService {
     return row ? { ...row, categories: this.categoriesFor(row.id) } : null;
   }
 
-  published({ categoryId, limit = 10, offset = 0 } = {}) {
+  /** Veröffentlichte Beiträge; mit `lang` nur in dieser Sprache. */
+  published({ categoryId, limit = 10, offset = 0, lang } = {}) {
     const params = [now()];
     let extra = '';
     if (categoryId) {
       extra = 'AND EXISTS (SELECT 1 FROM post_categories pc WHERE pc.post_id = p.id AND pc.category_id = ?)';
       params.push(categoryId);
+    }
+    if (lang && this.i18n) {
+      const l = this.i18n.where(lang, 'p.lang');
+      extra += ` AND ${l.sql}`;
+      params.push(...l.params);
     }
     const total = this.db.get(`SELECT COUNT(*) AS n FROM posts p WHERE ${PUBLISHED} ${extra}`, ...params).n;
     const items = this.db
@@ -132,6 +184,10 @@ export class PostService {
       }
     }
     if (out.content !== undefined) out.content = sanitizeContent(out.content);
+    if (out.lang !== undefined && this.i18n) {
+      if (out.lang && !this.i18n.languages().includes(out.lang)) throw badRequest('Validierung fehlgeschlagen', { lang: 'Sprache ist nicht eingerichtet' });
+      out.lang = this.i18n.storedLang(out.lang);
+    }
     if (out.category_ids) {
       for (const id of out.category_ids) if (!this.db.get('SELECT 1 FROM categories WHERE id = ?', id)) throw notFound(`Kategorie ${id} nicht gefunden`);
     }
@@ -149,8 +205,9 @@ export class PostService {
     const status = d.status || 'draft';
     return this.db.transaction(() => {
       const { lastInsertRowid: id } = this.db.run(
-        `INSERT INTO posts (title, slug, excerpt, content, cover_url, status, published_at, seo_title, seo_description, author_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO posts (title, slug, excerpt, content, cover_url, status, published_at, seo_title, seo_description, author_id, created_at, updated_at,
+           lang, translation_of)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         d.title,
         d.slug,
         d.excerpt || '',
@@ -163,6 +220,8 @@ export class PostService {
         userId ?? null,
         t,
         t,
+        d.lang || null,
+        d.translation_of || null,
       );
       if (d.category_ids) this.setCategories(id, d.category_ids);
       const post = this.find(id);
@@ -193,13 +252,13 @@ export class PostService {
       const finalStatus = d.status ?? existing.status;
       const finalDate = d.published_at !== undefined ? d.published_at : existing.published_at;
       if (finalStatus === 'published' && !finalDate) d.published_at = now();
-      const fields = ['title', 'slug', 'excerpt', 'content', 'cover_url', 'status', 'published_at', 'seo_title', 'seo_description'];
+      const fields = ['title', 'slug', 'excerpt', 'content', 'cover_url', 'status', 'published_at', 'seo_title', 'seo_description', 'lang'];
       const sets = [];
       const params = [];
       for (const f of fields) {
         if (d[f] === undefined) continue;
         sets.push(`${f} = ?`);
-        params.push(d[f] ?? (f === 'published_at' ? null : ''));
+        params.push(d[f] ?? (['published_at', 'lang'].includes(f) ? null : ''));
       }
       sets.push('updated_at = ?');
       params.push(now(), id);
@@ -253,40 +312,44 @@ export class PostService {
 
 function postCard(posts, p, heading = 'h2') {
   const url = posts.publicUrl(p, false);
+  const lang = posts.langOf(p);
   return `<article class="post-card">
   ${p.cover_url ? `<a href="${escapeHtml(url)}" tabindex="-1" aria-hidden="true"><img src="${escapeHtml(p.cover_url)}" alt="" loading="lazy"></a>` : ''}
   <div class="body">
-    <p class="meta">${p.categories.map((c) => `<a class="tag" href="/blog/kategorie/${escapeHtml(c.slug)}">${escapeHtml(c.name)}</a>`).join('')}<time datetime="${escapeHtml(p.published_at)}">${dateFmt.format(new Date(p.published_at))}</time></p>
+    <p class="meta">${p.categories.map((c) => `<a class="tag" href="${escapeHtml(posts.localPath(`/blog/kategorie/${c.slug}`, lang))}">${escapeHtml(c.name)}</a>`).join('')}<time datetime="${escapeHtml(p.published_at)}">${dateFmtFor(lang).format(new Date(p.published_at))}</time></p>
     <${heading}><a href="${escapeHtml(url)}">${escapeHtml(p.title)}</a></${heading}>
     <p>${escapeHtml(p.excerpt || excerpt(p.content, 180))}</p>
   </div>
 </article>`;
 }
 
-function pager(page, pages, base) {
+function pager(page, pages, base, t = (k) => ({ newer: '‹ Neuere', older: 'Ältere ›', page: 'Seite' })[k]) {
   if (pages <= 1) return '';
-  const link = (n, label) => `<a href="${base}${n > 1 ? `?seite=${n}` : ''}">${label}</a>`;
-  return `<nav class="pagination" aria-label="Seiten">${page > 1 ? link(page - 1, '‹ Neuere') : ''}<span>Seite ${page} von ${pages}</span>${
-    page < pages ? link(page + 1, 'Ältere ›') : ''
+  const link = (n, label) => `<a href="${base}${n > 1 ? `?seite=${n}` : ''}">${escapeHtml(label)}</a>`;
+  return `<nav class="pagination" aria-label="${escapeHtml(t('page'))}">${page > 1 ? link(page - 1, t('newer')) : ''}<span>${escapeHtml(t('page'))} ${page} / ${pages}</span>${
+    page < pages ? link(page + 1, t('older')) : ''
   }</nav>`;
 }
 
-function listView(ctx, req, { title, intro = '', categoryId, base }) {
+function listView(ctx, req, { title, intro = '', categoryId, base: rawBase }) {
   const perPage = ctx.settings.get('blog_posts_per_page');
   const page = Math.max(1, Number.parseInt(req.query.seite, 10) || 1);
-  const { items, total } = ctx.posts.published({ categoryId, limit: perPage, offset: (page - 1) * perPage });
+  const base = ctx.site.localPath(req, rawBase);
+  const t = (k) => ctx.site.t(req, k);
+  const { items, total } = ctx.posts.published({ categoryId, limit: perPage, offset: (page - 1) * perPage, lang: req.lang });
   const pages = Math.max(1, Math.ceil(total / perPage));
   return {
-    title: page > 1 ? `${title} – Seite ${page}` : title,
+    title: page > 1 ? `${title} – ${t('page')} ${page}` : title,
     canonical: ctx.site.url(page > 1 ? `${base}?seite=${page}` : base),
     status: page > pages ? 404 : 200,
     content: `<header class="hero"><h1>${escapeHtml(title)}</h1>${intro}</header>
-${items.length ? `<div class="post-list">${items.map((p) => postCard(ctx.posts, p)).join('')}</div>` : '<p class="muted">Noch keine Beiträge veröffentlicht.</p>'}
-${pager(page, pages, base)}`,
+${items.length ? `<div class="post-list">${items.map((p) => postCard(ctx.posts, p)).join('')}</div>` : `<p class="muted">${escapeHtml(t('noPosts'))}</p>`}
+${pager(page, pages, base, t)}`,
   };
 }
 
 function postView(ctx, req, post) {
+  const lang = ctx.posts.langOf(post);
   const author = post.author_name ? ` · ${escapeHtml(post.author_name)}` : '';
   return {
     title: post.seo_title || post.title,
@@ -295,9 +358,10 @@ function postView(ctx, req, post) {
     type: 'article',
     bodyClass: 'post',
     canonical: ctx.posts.publicUrl(post),
-    content: `<nav class="breadcrumbs" aria-label="Brotkrumen"><a href="/blog">${escapeHtml(ctx.settings.get('blog_title'))}</a></nav>
+    alternates: post.id ? ctx.posts.translations(post).filter((t) => t.status === 'published' && t.published_at <= now()).map((t) => ({ lang: t.lang, url: t.url })) : [],
+    content: `<nav class="breadcrumbs" aria-label="Brotkrumen"><a href="${escapeHtml(ctx.posts.localPath('/blog', lang))}">${escapeHtml(ctx.settings.get('blog_title'))}</a></nav>
 <article class="prose">
-  <p class="meta">${post.categories.map((c) => `<a class="tag" href="/blog/kategorie/${escapeHtml(c.slug)}">${escapeHtml(c.name)}</a>`).join('')}<time datetime="${escapeHtml(post.published_at)}">${dateFmt.format(new Date(post.published_at))}</time>${author}</p>
+  <p class="meta">${post.categories.map((c) => `<a class="tag" href="${escapeHtml(ctx.posts.localPath(`/blog/kategorie/${c.slug}`, lang))}">${escapeHtml(c.name)}</a>`).join('')}<time datetime="${escapeHtml(post.published_at)}">${dateFmtFor(lang).format(new Date(post.published_at))}</time>${author}</p>
   <h1>${escapeHtml(post.title)}</h1>
   ${post.excerpt ? `<p class="lead">${escapeHtml(post.excerpt)}</p>` : ''}
   ${post.cover_url ? `<img class="cover" src="${escapeHtml(post.cover_url)}" alt="">` : ''}
@@ -310,7 +374,7 @@ export default {
   name: 'blog',
   label: 'Blog',
   description: 'Beiträge mit Kategorien, geplanter Veröffentlichung, RSS-Feed und Newsletter-Anbindung.',
-  version: '1.1.0',
+  version: '1.2.0',
   adminDir: path.join(dir, 'admin'),
   // Autoren dürfen eigene Entwürfe anlegen und zur Prüfung einreichen
   authors: true,
@@ -357,6 +421,14 @@ export default {
       `,
     },
     { version: 2, sql: REVIEW_COLUMNS_SQL('posts') },
+    {
+      version: 3,
+      sql: `
+        ALTER TABLE posts ADD COLUMN lang TEXT;
+        ALTER TABLE posts ADD COLUMN translation_of INTEGER REFERENCES posts(id) ON DELETE SET NULL;
+        CREATE INDEX idx_posts_translation ON posts(translation_of);
+      `,
+    },
   ],
 
   setup(ctx) {
@@ -374,13 +446,13 @@ export default {
       },
       { ...opts, priority: 20 },
     );
-    hooks.on('site.head', () => `<link rel="alternate" type="application/rss+xml" title="${escapeHtml(settings.get('site_name'))}" href="/blog/feed.xml">`, opts);
+    hooks.on('site.head', (req) => `<link rel="alternate" type="application/rss+xml" title="${escapeHtml(settings.get('site_name'))}" href="${escapeHtml(ctx.site.localPath(req, '/blog/feed.xml'))}">`, opts);
     ctx.search.registerType('post', 'Beitrag', 'blog');
     hooks.on('search.documents', () => ctx.posts.searchDocuments(), opts);
     hooks.on(
       'site.sitemap',
       () => [
-        { loc: ctx.site.url('/blog') },
+        ...(ctx.i18n?.languages() || [null]).map((l) => ({ loc: ctx.site.url(ctx.posts.localPath('/blog', l)) })),
         ...ctx.posts.published({ limit: 5000 }).items.map((p) => ({ loc: ctx.posts.publicUrl(p), lastmod: p.updated_at })),
         ...ctx.posts.categories().filter((c) => c.post_count).map((c) => ({ loc: ctx.site.url(`/blog/kategorie/${c.slug}`) })),
       ],
@@ -391,7 +463,7 @@ export default {
       () => ({ blog: ctx.db.get("SELECT COUNT(*) AS total, SUM(status = 'draft') AS drafts, SUM(status = 'published' AND published_at > ?) AS scheduled, SUM(status = 'draft' AND review_requested_at IS NOT NULL) AS review FROM posts", now()) }),
       opts,
     );
-    hooks.on('menus.resolve', (item) => (item.type === 'blog' ? '/blog' : undefined), opts);
+    hooks.on('menus.resolve', (item, lang) => (item.type === 'blog' ? ctx.posts.localPath('/blog', lang) : undefined), opts);
     hooks.on(
       'system.setup',
       ({ user }) => {
@@ -413,10 +485,10 @@ export default {
 
     content.registerShortcode(
       'recent_posts',
-      (attrs) => {
+      (attrs, req) => {
         const limit = Math.min(12, Math.max(1, Number(attrs.limit) || 3));
         const cat = attrs.category ? ctx.db.get('SELECT id FROM categories WHERE slug = ?', attrs.category) : null;
-        const { items } = ctx.posts.published({ categoryId: cat?.id, limit });
+        const { items } = ctx.posts.published({ categoryId: cat?.id, limit, lang: req?.lang });
         if (!items.length) return '<p class="muted">Noch keine Beiträge.</p>';
         return `<div class="post-list">${items.map((p) => postCard(ctx.posts, p, 'h3')).join('')}</div>`;
       },
@@ -460,7 +532,10 @@ export default {
     });
     r.get('/:id', (req, res) => {
       const post = ctx.posts.find(parseId(req.params.id));
-      res.json({ ...post, url: ctx.posts.publicUrl(post), can_edit: ctx.review.canEdit(req, post), revisions: ctx.content.revisions('post', post.id) });
+      res.json({
+        ...post, lang: ctx.posts.langOf(post), url: ctx.posts.publicUrl(post), can_edit: ctx.review.canEdit(req, post),
+        translations: ctx.posts.translations(post), revisions: ctx.content.revisions('post', post.id),
+      });
     });
     r.put('/:id', async (req, res) => {
       const before = editable(req);
@@ -474,6 +549,11 @@ export default {
     r.delete('/:id', (req, res) => {
       ctx.posts.remove(editable(req).id);
       res.status(204).end();
+    });
+    // Übersetzung anlegen
+    r.post('/:id/translate', (req, res) => {
+      const { lang } = validate(req.body, { lang: { type: 'string', required: true, max: 2 } });
+      res.status(201).json(ctx.posts.translate(parseId(req.params.id), lang, req.user?.id));
     });
     // Freigabe-Workflow
     r.post('/:id/submit', async (req, res) => {
@@ -514,7 +594,7 @@ export default {
 
     router.get('/blog/feed.xml', (req, res) => {
       const s = ctx.settings.all();
-      const { items } = ctx.posts.published({ limit: 20 });
+      const { items } = ctx.posts.published({ limit: 20, lang: req.lang });
       const xml = items
         .map(
           (p) => `  <item>
@@ -531,10 +611,10 @@ export default {
 <rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
 <channel>
   <title>${escapeHtml(s.site_name)}</title>
-  <link>${escapeHtml(ctx.site.url('/blog'))}</link>
-  <atom:link href="${escapeHtml(ctx.site.url('/blog/feed.xml'))}" rel="self" type="application/rss+xml"/>
+  <link>${escapeHtml(ctx.site.url(ctx.site.localPath(req, '/blog')))}</link>
+  <atom:link href="${escapeHtml(ctx.site.url(ctx.site.localPath(req, '/blog/feed.xml')))}" rel="self" type="application/rss+xml"/>
   <description>${escapeHtml(s.site_description || s.site_tagline || s.site_name)}</description>
-  <language>de-de</language>
+  <language>${escapeHtml(req.lang || 'de')}</language>
 ${xml}
 </channel>
 </rss>
@@ -559,6 +639,8 @@ ${xml}
     router.get('/blog/:slug', (req, res, next) => {
       const post = ctx.posts.findPublishedBySlug(req.params.slug);
       if (!post) return next();
+      // Beitrag einer anderen Sprache → auf seine richtige Adresse
+      if (ctx.i18n && ctx.posts.langOf(post) !== req.lang) return res.redirect(301, ctx.posts.publicUrl(post, false));
       ctx.site.send(req, res, postView(ctx, req, post));
     });
   },

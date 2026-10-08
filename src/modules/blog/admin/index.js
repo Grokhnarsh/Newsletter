@@ -1,7 +1,8 @@
 // Admin-Oberfläche des Blog-Moduls
 import { del, get, post, put } from '/admin/js/api.js';
 import {
-  bindCover, bindReview, bindRevisions, coverField, makeReadOnly, openPreview, reviewNotice, revisionsCard, seoCard, slugify, statusBadge, statusField, submitButton,
+  bindCover, bindReview, bindRevisions, bindTranslations, coverField, langBadge, languageCard, makeReadOnly, openPreview, reviewNotice, revisionsCard,
+  seoCard, siteLanguages, slugify, statusBadge, statusField, submitButton,
 } from '/admin/js/content-ui.js';
 import { richEditor } from '/admin/js/editor.js';
 import { saveSettings } from '/admin/js/settings.js';
@@ -14,8 +15,8 @@ let cmsRef = null;
 
 async function postsView(el) {
   const params = new URLSearchParams(location.hash.split('?')[1] || '');
-  const state = { q: '', status: params.get('status') || '', category_id: '', page: 1 };
-  const categories = await get('/categories');
+  const state = { q: '', status: params.get('status') || '', category_id: '', lang: '', page: 1 };
+  const [categories, langs] = await Promise.all([get('/categories'), siteLanguages()]);
   setHtml(
     el,
     html`<div class="page-head">
@@ -27,6 +28,7 @@ async function postsView(el) {
           <input type="search" id="q" placeholder="Suchen …" style="max-width:260px" aria-label="Suche">
           <select id="status" style="max-width:180px" aria-label="Status"><option value="">Alle</option><option value="published">Veröffentlicht</option><option value="scheduled">Geplant</option><option value="draft">Entwürfe</option><option value="review">Zur Prüfung</option></select>
           <select id="cat" style="max-width:200px" aria-label="Kategorie"><option value="">Alle Kategorien</option>${categories.map((c) => html`<option value="${c.id}">${c.name}</option>`)}</select>
+          ${langs.length > 1 ? html`<select id="lang" style="max-width:160px" aria-label="Sprache"><option value="">Alle Sprachen</option>${langs.map((l) => html`<option value="${l}">${l.toUpperCase()}</option>`)}</select>` : ''}
         </div>
         <div id="rows"></div>
       </div>`,
@@ -34,7 +36,7 @@ async function postsView(el) {
   $('#status', el).value = state.status;
   const load = async () => {
     const qs = new URLSearchParams({ page: state.page, per_page: 20 });
-    for (const k of ['q', 'status', 'category_id']) if (state[k]) qs.set(k, state[k]);
+    for (const k of ['q', 'status', 'category_id', 'lang']) if (state[k]) qs.set(k, state[k]);
     const data = await get(`/posts?${qs}`);
     const box = $('#rows', el);
     setHtml(
@@ -45,11 +47,11 @@ async function postsView(el) {
           data.items.length
             ? data.items.map(
                 (p) => html`<tr class="clickable" data-id="${p.id}">
-                  <td><strong>${p.title}</strong><div class="muted small">/blog/${p.slug}</div></td>
+                  <td><strong>${p.title}</strong> ${langBadge(p.lang, langs)}<div class="muted small">${langs.length > 1 && p.lang !== langs[0] ? `/${p.lang}` : ''}/blog/${p.slug}</div></td>
                   <td>${p.categories.map((c) => html`<span class="chip">${c.name}</span>`)}</td>
                   <td>${statusBadge(p.status, p.scheduled, Boolean(p.review_requested_at))}</td>
                   <td class="small nowrap">${fmtDateTime(p.published_at || p.updated_at)}<div class="muted">${p.author || ''}</div></td>
-                  <td class="right">${p.status === 'published' && !p.scheduled ? html`<a class="btn btn-sm" href="/blog/${p.slug}" target="_blank" rel="noopener">Ansehen ↗</a>` : ''}</td>
+                  <td class="right">${p.status === 'published' && !p.scheduled ? html`<a class="btn btn-sm" href="${langs.length > 1 && p.lang !== langs[0] ? `/${p.lang}` : ''}/blog/${p.slug}" target="_blank" rel="noopener">Ansehen ↗</a>` : ''}</td>
                 </tr>`,
               )
             : html`<tr><td colspan="5" class="empty">Keine Beiträge gefunden.</td></tr>`
@@ -69,15 +71,17 @@ async function postsView(el) {
   };
   $('#q', el).addEventListener('input', debounce((e) => ((state.q = e.target.value.trim()), (state.page = 1), load())));
   $('#status', el).addEventListener('change', (e) => ((state.status = e.target.value), (state.page = 1), load()));
+  $('#lang', el)?.addEventListener('change', (e) => ((state.lang = e.target.value), (state.page = 1), load()));
   $('#cat', el).addEventListener('change', (e) => ((state.category_id = e.target.value), (state.page = 1), load()));
   await load();
 }
 
 async function postEditorView(el, id) {
   const isNew = id === 'new';
-  const [post0, categories] = await Promise.all([
+  const [post0, categories, langs] = await Promise.all([
     isNew ? Promise.resolve({ title: '', slug: '', excerpt: '', content: '', status: 'draft', category_ids: [], revisions: [] }) : get(`/posts/${id}`),
     get('/categories'),
+    siteLanguages(),
   ]);
   const p = post0;
   const scheduled = p.status === 'published' && p.published_at && new Date(p.published_at) > new Date();
@@ -92,7 +96,7 @@ async function postEditorView(el, id) {
           <div class="sub">${statusBadge(p.status, scheduled, Boolean(p.review_requested_at))} <span id="dirty" class="muted small"></span></div></div>
         <div class="toolbar">
           <button class="btn" id="preview">Vorschau</button>
-          ${!isNew && p.status === 'published' && !scheduled ? html`<a class="btn" href="/blog/${p.slug}" target="_blank" rel="noopener">Ansehen ↗</a>` : ''}
+          ${!isNew && p.status === 'published' && !scheduled ? html`<a class="btn" href="${p.url}" target="_blank" rel="noopener">Ansehen ↗</a>` : ''}
           ${submitButton(p, isNew)}
           <button class="btn btn-primary" id="save">Speichern</button>
         </div>
@@ -119,6 +123,7 @@ async function postEditorView(el, id) {
             }
             ${!isNew ? html`<button type="button" class="btn btn-sm btn-ghost" id="delete" style="color:var(--danger)">Beitrag löschen</button>` : ''}
           </div>
+          ${languageCard(p, isNew, langs, '/posts')}
           <div class="card side-card">
             <h3>Kategorien</h3>
             ${
@@ -215,6 +220,7 @@ async function postEditorView(el, id) {
   if (!isNew) {
     bindRevisions(el, `/posts/${id}`, () => postEditorView(el, id));
     bindReview(el, `/posts/${id}`, { save: () => (dirty ? save() : true), reload: () => postEditorView(el, id) });
+    bindTranslations(el, `/posts/${id}`, '/posts', { save: () => (dirty ? save() : true) });
     if (!p.can_edit) makeReadOnly(el, form, editor);
   }
 

@@ -43,7 +43,7 @@ export class StatsService {
     if (res.statusCode !== 200 || !String(res.get('Content-Type') || '').startsWith('text/html')) return;
     const ua = req.get('user-agent') || '';
     if (!ua || BOT_RE.test(ua)) return;
-    const pathName = req.path.slice(0, 300);
+    const pathName = req.originalUrl.split('?')[0].slice(0, 300);
     if (/^\/(admin|api|uploads|theme|t\/|view\/|unsubscribe|preferences|confirm)/.test(pathName)) return;
     const day = today();
     this.purge(day);

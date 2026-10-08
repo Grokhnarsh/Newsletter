@@ -207,7 +207,7 @@ export default {
     ctx.redirects = new RedirectService(ctx.db);
     const opts = { module: 'redirects' };
     ctx.hooks.on('content.moved', (moves) => ctx.redirects.contentMoved(moves), opts);
-    ctx.hooks.on('site.not_found', (req) => ctx.redirects.recordMiss(req.path, req.get('referer')), opts);
+    ctx.hooks.on('site.not_found', (req) => ctx.redirects.recordMiss(req.originalUrl.split('?')[0], req.get('referer')), opts);
     ctx.hooks.on('admin.dashboard', () => ({ redirects: { misses: ctx.db.get('SELECT COUNT(*) AS n FROM redirect_misses').n } }), opts);
   },
 
@@ -232,7 +232,7 @@ export default {
   fallbackRoutes(router, ctx) {
     router.use((req, res, next) => {
       if (req.method !== 'GET' && req.method !== 'HEAD') return next();
-      const hit = ctx.redirects.match(req.path);
+      const hit = ctx.redirects.match(req.originalUrl.split('?')[0]);
       if (!hit) return next();
       if (hit.code === 410) {
         return ctx.site.message(req, res, { title: 'Nicht mehr verfügbar', message: 'Diese Seite wurde dauerhaft entfernt.', status: 410 });
