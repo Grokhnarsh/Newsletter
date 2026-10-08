@@ -1,7 +1,9 @@
 import path from 'node:path';
 import express from 'express';
+import { AuditLog, auditMiddleware } from './core/audit.js';
 import { ContentService } from './core/content.js';
 import { HookBus } from './core/hooks.js';
+import { MAIL_SETTINGS, SystemMail } from './core/mail.js';
 import { ModuleManager } from './core/modules.js';
 import { authRoutes } from './core/routes/auth.js';
 import { systemRoutes } from './core/routes/system.js';
@@ -26,7 +28,11 @@ export async function createCms({ db, config, mailer, logger = console, modules:
   const site = new SiteService({ config, settings, hooks, content, logger });
   const users = new UserService(db, config);
 
+  const audit = new AuditLog(db);
+  const systemMail = new SystemMail({ mailer, settings, logger });
+
   settings.register('core', SITE_SETTINGS.defaults, SITE_SETTINGS.rules);
+  settings.register('core', MAIL_SETTINGS.defaults, MAIL_SETTINGS.rules);
   for (const mod of moduleList) manager.add(mod);
   await manager.loadDirectory(config.modulesDir);
   manager.resolve();
@@ -35,7 +41,7 @@ export async function createCms({ db, config, mailer, logger = console, modules:
   await site.loadTheme(config.theme);
 
   // Gemeinsamer Kontext; Module hängen ihre Services direkt an (z. B. ctx.subscribers).
-  const ctx = { db, config, mailer, logger, settings, hooks, content, site, users, modules: manager };
+  const ctx = { db, config, mailer, logger, settings, hooks, content, site, users, audit, systemMail, modules: manager };
   // Einmaliger Einrichtungscode: ohne ihn kann niemand das erste Administratorkonto anlegen.
   ctx.setupToken = config.setupToken || randomToken(12);
   manager.setup(ctx);
@@ -64,6 +70,7 @@ export async function createCms({ db, config, mailer, logger = console, modules:
     if (req.path.startsWith('/media') && req.method === 'POST') return next();
     return (req.path.startsWith('/subscribers/import') ? parsers.import : parsers.user)(req, res, next);
   });
+  api.use(auditMiddleware(audit));
   api.use('/auth', authRoutes(ctx, auth));
   for (const router of manager.mount('publicApi', ctx)) api.use(router);
   api.use(auth);

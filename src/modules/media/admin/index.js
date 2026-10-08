@@ -1,5 +1,5 @@
 // Admin-Oberfläche des Medien-Moduls
-import { ApiError, del, get, put, session } from '/admin/js/api.js';
+import { ApiError, CSRF_HEADERS, del, get, put } from '/admin/js/api.js';
 import { $, confirmDialog, debounce, fmtDateTime, fmtNum, html, modal, pager, setHtml, toast, toastError } from '/admin/js/ui.js';
 
 const ACCEPT = 'image/jpeg,image/png,image/gif,image/webp,application/pdf,video/mp4,audio/mpeg';
@@ -11,9 +11,8 @@ function fmtSize(bytes) {
 }
 
 async function upload(file) {
-  const headers = { 'Content-Type': file.type || 'application/octet-stream', 'X-Filename': encodeURIComponent(file.name) };
-  if (session.token) headers.Authorization = `Bearer ${session.token}`;
-  const res = await fetch('/api/media', { method: 'POST', headers, body: file });
+  const headers = { ...CSRF_HEADERS, 'Content-Type': file.type || 'application/octet-stream', 'X-Filename': encodeURIComponent(file.name) };
+  const res = await fetch('/api/media', { method: 'POST', headers, credentials: 'same-origin', body: file });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new ApiError(res.status, `${file.name}: ${data.error || `Fehler ${res.status}`}`);
   return data;

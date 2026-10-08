@@ -20,9 +20,6 @@ const dir = path.dirname(fileURLToPath(import.meta.url));
 
 const settings = {
   defaults: {
-    sender_name: 'Newsletter',
-    sender_email: 'newsletter@example.com',
-    reply_to: '',
     double_opt_in: true,
     send_rate_per_minute: 60,
     default_template_id: null,
@@ -36,9 +33,6 @@ const settings = {
     welcome_html: '<p>Hallo {{first_name | "zusammen"}},</p>\n<p>schön, dass du dabei bist! Ab sofort erhältst du unseren Newsletter.</p>',
   },
   rules: {
-    sender_name: { type: 'string', max: 200 },
-    sender_email: { type: 'email' },
-    reply_to: { type: 'string', max: 254 },
     double_opt_in: { type: 'bool' },
     send_rate_per_minute: { type: 'int', min: 1, max: 100000 },
     default_template_id: { type: 'int', min: 1 },

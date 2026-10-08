@@ -1,13 +1,14 @@
 import { registry } from './registry.js';
 import { del, get, post, put } from './api.js';
 import { ctx, navigate } from './state.js';
-import { $, $$, confirmDialog, fmtDateTime, formData, html, modal, raw, setHtml, toast, toastError } from './ui.js';
+import { $, $$, confirmDialog, debounce, fmtDateTime, formData, html, modal, pager, raw, setHtml, toast, toastError } from './ui.js';
 
 const CORE_TABS = [
   { id: 'website', label: 'Website', order: 0, render: websiteTab },
   { id: 'modules', label: 'Module', order: 80, adminOnly: true, render: modulesTab },
   { id: 'users', label: 'Benutzer', order: 90, adminOnly: true, render: usersTab },
   { id: 'api', label: 'API', order: 95, adminOnly: true, render: apiTab },
+  { id: 'audit', label: 'Protokoll', order: 97, adminOnly: true, render: auditTab },
 ];
 
 export async function settingsView(el, tab = 'website') {
@@ -73,6 +74,15 @@ async function websiteTab(box) {
           <div class="field"><label for="w-priv">Link zur Datenschutzerklärung</label><input id="w-priv" name="privacy_url" type="text" value="${s.privacy_url}" placeholder="/datenschutz" ${disabled}></div>
         </div>
       </div>
+      <div class="card">
+        <h2>E-Mail-Absender</h2>
+        <p class="muted small">Für Systemmails (Passwort-Reset, Formular-Benachrichtigungen) und als Standard für Newsletter.</p>
+        <div class="inline-fields">
+          <div class="field"><label for="w-sname">Absendername</label><input id="w-sname" name="sender_name" type="text" value="${s.sender_name}" ${disabled}></div>
+          <div class="field"><label for="w-semail">Absender-E-Mail</label><input id="w-semail" name="sender_email" type="email" value="${s.sender_email}" required ${disabled}></div>
+        </div>
+        <div class="field"><label for="w-reply">Antwortadresse (optional)</label><input id="w-reply" name="reply_to" type="email" value="${s.reply_to}" ${disabled}></div>
+      </div>
       ${ctx.isAdmin ? html`<div><button class="btn btn-primary" type="submit">Speichern</button></div>` : ''}
     </form>`,
   );
@@ -127,6 +137,9 @@ async function modulesTab(box) {
   );
 }
 
+const ROLE_LABELS = { admin: 'Administrator', editor: 'Redakteur', author: 'Autor' };
+const ROLE_BADGE = { admin: 'badge-info', editor: 'badge-muted', author: 'badge-warn' };
+
 function userDialog(user, onSaved) {
   modal({
     title: user ? 'Benutzer bearbeiten' : 'Benutzer anlegen',
@@ -134,16 +147,29 @@ function userDialog(user, onSaved) {
       <div class="field"><label for="u-name">Name</label><input id="u-name" name="name" type="text" value="${user?.name || ''}"></div>
       <div class="field"><label for="u-email">E-Mail *</label><input id="u-email" name="email" type="email" required value="${user?.email || ''}"></div>
       <div class="field"><label for="u-role">Rolle</label><select id="u-role" name="role">
-        <option value="editor" ${user?.role === 'editor' ? raw('selected') : ''}>Redakteur – Kampagnen, Abonnenten, Listen, Vorlagen</option>
+        <option value="author" ${user?.role === 'author' ? raw('selected') : ''}>Autor – eigene Seiten und Beiträge als Entwurf, Medien</option>
+        <option value="editor" ${!user || user.role === 'editor' ? raw('selected') : ''}>Redakteur – alle Inhalte, Veröffentlichen, Newsletter</option>
         <option value="admin" ${user?.role === 'admin' ? raw('selected') : ''}>Administrator – zusätzlich Einstellungen, Benutzer, API</option>
       </select></div>
-      <div class="field"><label for="u-pw">${user ? 'Neues Passwort (optional)' : 'Passwort *'}</label><input id="u-pw" name="password" type="password" minlength="10" ${user ? '' : raw('required')} autocomplete="new-password"><div class="help">Mindestens 10 Zeichen</div></div>`,
+      ${
+        user
+          ? html`<div class="field"><label for="u-pw">Neues Passwort (optional)</label><input id="u-pw" name="password" type="password" minlength="10" autocomplete="new-password"><div class="help">Mindestens 10 Zeichen</div></div>`
+          : html`<label class="checkline"><input type="checkbox" name="invite" id="u-invite" checked> Zugangslink per E-Mail senden (Benutzer legt das Passwort selbst fest)</label>
+              <div class="field hidden" id="u-pw-field"><label for="u-pw">Passwort *</label><input id="u-pw" name="password" type="password" minlength="10" autocomplete="new-password"><div class="help">Mindestens 10 Zeichen</div></div>`
+      }`,
+    onOpen: (d) => {
+      const invite = $('#u-invite', d);
+      invite?.addEventListener('change', () => {
+        $('#u-pw-field', d).classList.toggle('hidden', invite.checked);
+        $('#u-pw', d).required = !invite.checked;
+      });
+    },
     onSubmit: async (form) => {
       const d = formData(form);
       if (!d.password) delete d.password;
       if (user) await put(`/users/${user.id}`, d);
       else await post('/users', d);
-      toast('Benutzer gespeichert');
+      toast(d.invite ? 'Benutzer angelegt – Zugangslink wurde verschickt' : 'Benutzer gespeichert');
       onSaved();
     },
   });
@@ -156,23 +182,53 @@ async function usersTab(box) {
     html`<div class="card">
       <div class="card-head"><h2>Benutzer</h2><button class="btn btn-primary" id="add-user">+ Benutzer</button></div>
       <div class="table-wrap"><table>
-        <thead><tr><th>Name</th><th>E-Mail</th><th>Rolle</th><th>Letzte Anmeldung</th><th></th></tr></thead>
+        <thead><tr><th>Name</th><th>E-Mail</th><th>Rolle</th><th>2FA</th><th>Letzte Anmeldung</th><th></th></tr></thead>
         <tbody>${users.map(
           (u) => html`<tr><td>${u.name || '–'}</td><td>${u.email}</td>
-            <td>${u.role === 'admin' ? html`<span class="badge badge-info">Administrator</span>` : html`<span class="badge badge-muted">Redakteur</span>`}</td>
+            <td><span class="badge ${ROLE_BADGE[u.role]}">${ROLE_LABELS[u.role] || u.role}</span></td>
+            <td>${u.totp_enabled ? html`<span class="badge badge-good">aktiv</span>` : html`<span class="muted small">–</span>`}</td>
             <td class="small">${fmtDateTime(u.last_login_at)}</td>
             <td class="right nowrap"><button class="btn btn-sm" data-edit="${u.id}">Bearbeiten</button>
+              <button class="btn btn-sm btn-ghost" data-reset="${u.id}" title="Link zum Festlegen eines neuen Passworts senden">Reset-Link</button>
+              ${u.totp_enabled && u.id !== ctx.user.id ? html`<button class="btn btn-sm btn-ghost" data-tfa="${u.id}">2FA zurücksetzen</button>` : ''}
               ${u.id !== ctx.user.id ? html`<button class="btn btn-sm btn-ghost" data-del="${u.id}" aria-label="Löschen">🗑</button>` : ''}</td></tr>`,
         )}</tbody>
       </table></div>
+      <p class="muted small" style="margin-top:12px">Autoren können eigene Entwürfe schreiben und zur Prüfung einreichen; veröffentlichen dürfen Redakteure und Administratoren.</p>
     </div>`,
   );
   const reload = () => usersTab(box);
+  const byId = (id) => users.find((u) => u.id === Number(id));
   $('#add-user', box).addEventListener('click', () => userDialog(null, reload));
-  $$('[data-edit]', box).forEach((b) => b.addEventListener('click', () => userDialog(users.find((u) => u.id === Number(b.dataset.edit)), reload)));
+  $$('[data-edit]', box).forEach((b) => b.addEventListener('click', () => userDialog(byId(b.dataset.edit), reload)));
+  $$('[data-reset]', box).forEach((b) =>
+    b.addEventListener('click', async () => {
+      const u = byId(b.dataset.reset);
+      if (!(await confirmDialog('Reset-Link senden', `${u.email} erhält per E-Mail einen Link, um ein neues Passwort festzulegen.`, { submitLabel: 'Senden', danger: false }))) return;
+      try {
+        await post(`/users/${u.id}/send-reset`);
+        toast('Link verschickt');
+      } catch (err) {
+        toastError(err);
+      }
+    }),
+  );
+  $$('[data-tfa]', box).forEach((b) =>
+    b.addEventListener('click', async () => {
+      const u = byId(b.dataset.tfa);
+      if (!(await confirmDialog('2FA zurücksetzen', `Die Zwei-Faktor-Anmeldung von ${u.email} wird deaktiviert und alle Sitzungen beendet.`, { submitLabel: 'Zurücksetzen' }))) return;
+      try {
+        await post(`/users/${u.id}/reset-2fa`);
+        toast('Zwei-Faktor-Anmeldung zurückgesetzt');
+        reload();
+      } catch (err) {
+        toastError(err);
+      }
+    }),
+  );
   $$('[data-del]', box).forEach((b) =>
     b.addEventListener('click', async () => {
-      const u = users.find((x) => x.id === Number(b.dataset.del));
+      const u = byId(b.dataset.del);
       if (!(await confirmDialog('Benutzer löschen', `${u.email} löschen?`, { submitLabel: 'Löschen' }))) return;
       try {
         await del(`/users/${u.id}`);
@@ -183,6 +239,59 @@ async function usersTab(box) {
       }
     }),
   );
+}
+
+// Lesbare Beschreibung eines Protokolleintrags
+const ENTITY_LABELS = {
+  pages: 'Seite', posts: 'Beitrag', categories: 'Kategorie', media: 'Datei', menus: 'Menü', subscribers: 'Abonnent', lists: 'Liste',
+  templates: 'Vorlage', campaigns: 'Kampagne', settings: 'Einstellungen', users: 'Benutzer', 'api-keys': 'API-Schlüssel', system: 'System',
+  forms: 'Formular', redirects: 'Weiterleitung', segments: 'Segment', automations: 'Automation', webhooks: 'Webhook',
+};
+const EVENT_LABELS = {
+  login: 'Anmeldung', login_failed: 'Fehlgeschlagene Anmeldung', login_2fa_failed: 'Falscher 2FA-Code', password_changed: 'Passwort geändert',
+  password_reset_requested: 'Passwort-Reset angefordert', password_reset: 'Passwort zurückgesetzt', '2fa_enabled': '2FA aktiviert', '2fa_disabled': '2FA deaktiviert',
+};
+function describeAudit(e) {
+  if (EVENT_LABELS[e.action]) return { text: EVENT_LABELS[e.action], detail: e.target };
+  const parts = e.target.split('/').filter(Boolean);
+  const entity = ENTITY_LABELS[parts[0]] || parts[0] || '';
+  const id = /^\d+$/.test(parts[1] || '') ? ` #${parts[1]}` : '';
+  const sub = parts.slice(id ? 2 : 1).join('/');
+  const verb = { POST: sub ? 'Aktion' : 'angelegt', PUT: 'geändert', DELETE: 'gelöscht', PATCH: 'geändert' }[e.action] || e.action;
+  return { text: `${entity}${id} ${verb}${sub ? `: ${sub}` : ''}`, detail: `${e.action} ${e.target}` };
+}
+
+async function auditTab(box) {
+  const state = { q: '', page: 1 };
+  setHtml(
+    box,
+    html`<div class="card">
+      <div class="card-head"><h2>Änderungsprotokoll</h2><input type="search" id="audit-q" placeholder="Filtern …" style="max-width:240px" aria-label="Filtern"></div>
+      <p class="muted small">Anmeldungen und alle Änderungen über die Verwaltung bzw. API. Einträge werden nach 365 Tagen gelöscht.</p>
+      <div id="audit-rows"></div>
+    </div>`,
+  );
+  const load = async () => {
+    const qs = new URLSearchParams({ page: state.page, per_page: 50 });
+    if (state.q) qs.set('q', state.q);
+    const data = await get(`/system/audit?${qs}`);
+    const rows = $('#audit-rows', box);
+    setHtml(
+      rows,
+      html`<div class="table-wrap"><table><thead><tr><th>Zeit</th><th>Wer</th><th>Was</th><th>IP</th></tr></thead><tbody>${
+        data.items.length
+          ? data.items.map((e) => {
+              const d = describeAudit(e);
+              return html`<tr><td class="small nowrap">${fmtDateTime(e.created_at)}</td><td class="small">${e.actor}</td>
+                <td>${d.text}<div class="muted small">${d.detail}</div></td><td class="small muted">${e.ip || ''}</td></tr>`;
+            })
+          : html`<tr><td colspan="4" class="empty">Keine Einträge.</td></tr>`
+      }</tbody></table></div>`,
+    );
+    rows.append(pager(data, (p) => ((state.page = p), load())));
+  };
+  $('#audit-q', box).addEventListener('input', debounce((e) => ((state.q = e.target.value.trim()), (state.page = 1), load())));
+  await load();
 }
 
 async function apiTab(box) {

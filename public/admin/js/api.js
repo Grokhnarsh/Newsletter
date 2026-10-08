@@ -1,23 +1,15 @@
-const TOKEN_KEY = 'newsletter.token';
+// Die Sitzung liegt in einem httpOnly-Cookie (für JavaScript unlesbar). Jede Anfrage
+// trägt zusätzlich einen eigenen Header als CSRF-Schutz.
+export const CSRF_HEADERS = { 'X-Requested-With': 'cms-admin' };
 
-export const session = {
-  get token() {
-    try {
-      return localStorage.getItem(TOKEN_KEY);
-    } catch {
-      return null;
-    }
-  },
-  set token(value) {
-    try {
-      if (value) localStorage.setItem(TOKEN_KEY, value);
-      else localStorage.removeItem(TOKEN_KEY);
-    } catch {
-      /* Speicher nicht verfügbar */
-    }
-  },
-  user: null,
-};
+export const session = { user: null };
+
+// Alte Versionen speicherten das Token im Browser – entfernen.
+try {
+  localStorage.removeItem('newsletter.token');
+} catch {
+  /* Speicher nicht verfügbar */
+}
 
 export class ApiError extends Error {
   constructor(status, message, details) {
@@ -28,14 +20,10 @@ export class ApiError extends Error {
 }
 
 export async function api(path, { method = 'GET', body, raw = false } = {}) {
-  const headers = {};
-  if (session.token) headers.Authorization = `Bearer ${session.token}`;
+  const headers = { ...CSRF_HEADERS };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
-  const res = await fetch(`/api${path}`, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined });
-  if (res.status === 401 && !path.startsWith('/auth/')) {
-    session.token = null;
-    window.dispatchEvent(new CustomEvent('auth:expired'));
-  }
+  const res = await fetch(`/api${path}`, { method, headers, credentials: 'same-origin', body: body !== undefined ? JSON.stringify(body) : undefined });
+  if (res.status === 401 && !path.startsWith('/auth/')) window.dispatchEvent(new CustomEvent('auth:expired'));
   if (!res.ok) {
     let data = {};
     try {

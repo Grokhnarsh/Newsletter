@@ -17,6 +17,7 @@
   "dependencies": {
     "express": "^5.2.1",
     "nodemailer": "^10.0.13",
+    "qrcode-svg": "^1.1.0",
     "sanitize-html": "^2.18.0"
   }
 }
