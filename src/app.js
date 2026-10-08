@@ -2,6 +2,7 @@ import path from 'node:path';
 import express from 'express';
 import { AuditLog, auditMiddleware } from './core/audit.js';
 import { BACKUP_SETTINGS, BackupService } from './core/backup.js';
+import { CACHE_SETTINGS, PageCache } from './core/cache.js';
 import { ContentService } from './core/content.js';
 import { HookBus } from './core/hooks.js';
 import { MAIL_SETTINGS, SystemMail } from './core/mail.js';
@@ -36,6 +37,7 @@ export async function createCms({ db, config, mailer, logger = console, modules:
   settings.register('core', SITE_SETTINGS.defaults, SITE_SETTINGS.rules);
   settings.register('core', MAIL_SETTINGS.defaults, MAIL_SETTINGS.rules);
   settings.register('core', BACKUP_SETTINGS.defaults, BACKUP_SETTINGS.rules);
+  settings.register('core', CACHE_SETTINGS.defaults, CACHE_SETTINGS.rules);
   for (const mod of moduleList) manager.add(mod);
   await manager.loadDirectory(config.modulesDir);
   manager.resolve();
@@ -46,7 +48,8 @@ export async function createCms({ db, config, mailer, logger = console, modules:
   // Gemeinsamer Kontext; Module hängen ihre Services direkt an (z. B. ctx.subscribers).
   const backups = new BackupService({ db, config, settings, modules: manager, logger });
   const search = new SearchService({ db, hooks });
-  const ctx = { db, config, mailer, logger, settings, hooks, content, site, users, audit, systemMail, backups, search, modules: manager };
+  const cache = new PageCache(settings);
+  const ctx = { db, config, mailer, logger, settings, hooks, content, site, users, audit, systemMail, backups, search, cache, modules: manager };
   site.search = search;
   // Einmaliger Einrichtungscode: ohne ihn kann niemand das erste Administratorkonto anlegen.
   ctx.setupToken = config.setupToken || randomToken(12);
@@ -79,6 +82,11 @@ export async function createCms({ db, config, mailer, logger = console, modules:
     return (req.path.startsWith('/subscribers/import') ? parsers.import : parsers.user)(req, res, next);
   });
   api.use(auditMiddleware(audit));
+  // Jede erfolgreiche Änderung leert den Seiten-Cache der Website
+  api.use((req, res, next) => {
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) res.on('finish', () => res.statusCode < 400 && cache.clear());
+    next();
+  });
   api.use('/auth', authRoutes(ctx, auth));
   for (const router of manager.mount('publicApi', ctx)) api.use(router);
   api.use(auth);
@@ -87,7 +95,12 @@ export async function createCms({ db, config, mailer, logger = console, modules:
   api.use(notFoundHandler);
   app.use('/api', api);
 
-  // Öffentliche Website: Modulrouten, Kernrouten, dann Fallbacks (z. B. Seiten-Slugs)
+  // Öffentliche Website: Besuch melden (Statistik), Cache, Modulrouten, Kernrouten, Fallbacks
+  app.use((req, res, next) => {
+    if (req.method === 'GET') res.on('finish', () => hooks.emit('site.pageview', req, res));
+    next();
+  });
+  app.use(cache.middleware());
   for (const router of manager.mount('publicRoutes', ctx)) app.use(router);
   app.use(site.routes());
   for (const router of manager.mount('fallbackRoutes', ctx)) app.use(router);

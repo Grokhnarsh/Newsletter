@@ -86,6 +86,13 @@ ${systemMail.button(url, 'Passwort festlegen')}
     res.json({ ok: true });
   });
 
+  // ---- Seiten-Cache ----
+  router.get('/system/cache', requireAdmin, (req, res) => res.json(ctx.cache.stats()));
+  router.delete('/system/cache', requireAdmin, (req, res) => {
+    ctx.cache.clear();
+    res.status(204).end();
+  });
+
   // ---- Suchindex ----
   router.post('/system/search/rebuild', requireAdmin, (req, res) => {
     res.json({ documents: ctx.search.rebuild() });

@@ -245,7 +245,7 @@ async function usersTab(box) {
 const fmtBytes = (n) => (n < 1048576 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1048576).toFixed(1).replace('.', ',')} MB`);
 
 async function backupTab(box) {
-  const [list, s] = await Promise.all([get('/system/backups'), ctx.getSettings(true)]);
+  const [list, s, cacheInfo] = await Promise.all([get('/system/backups'), ctx.getSettings(true), get('/system/cache')]);
   setHtml(
     box,
     html`<div class="card">
@@ -267,6 +267,16 @@ async function backupTab(box) {
       <p class="muted">Die Website-Suche aktualisiert sich automatisch. Nach einer Wiederherstellung oder einem Import kann der Index hier neu aufgebaut werden.</p>
       <button class="btn" id="reindex">Suchindex neu aufbauen</button>
     </div>
+    <form class="card" id="cache-settings">
+      <h2>Seiten-Cache</h2>
+      <p class="muted">Öffentliche Seiten werden für kurze Zeit im Arbeitsspeicher gehalten und dadurch deutlich schneller ausgeliefert.
+      Jede Änderung im Admin-Bereich leert den Cache automatisch.</p>
+      <div class="inline-fields">
+        <div class="field"><label for="c-ttl">Gültigkeit in Sekunden</label><input id="c-ttl" name="cache_ttl_seconds" type="number" min="0" max="86400" value="${s.cache_ttl_seconds}"><div class="help">0 = Cache aus</div></div>
+      </div>
+      <p class="muted small" id="cache-info">${cacheInfo.entries} Seiten im Cache · ${cacheInfo.hits} Treffer · ${cacheInfo.misses} Fehlgriffe seit dem Start</p>
+      <div class="toolbar"><button class="btn btn-primary" type="submit">Speichern</button><button class="btn" type="button" id="cache-clear">Cache leeren</button></div>
+    </form>
     <form class="card" id="backup-settings">
       <h2>Automatische Backups</h2>
       <div class="inline-fields">
@@ -292,6 +302,24 @@ async function backupTab(box) {
     try {
       const r = await post('/system/search/rebuild');
       toast(`Suchindex mit ${r.documents} Dokumenten neu aufgebaut`);
+    } catch (err) {
+      toastError(err);
+    }
+  });
+  $('#cache-clear', box).addEventListener('click', async () => {
+    try {
+      await del('/system/cache');
+      const c = await get('/system/cache');
+      $('#cache-info', box).textContent = `${c.entries} Seiten im Cache · ${c.hits} Treffer · ${c.misses} Fehlgriffe seit dem Start`;
+      toast('Cache geleert');
+    } catch (err) {
+      toastError(err);
+    }
+  });
+  $('#cache-settings', box).addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      await saveSettings({ cache_ttl_seconds: Number(formData(e.target).cache_ttl_seconds) });
     } catch (err) {
       toastError(err);
     }

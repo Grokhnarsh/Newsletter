@@ -78,7 +78,10 @@ export class SiteService {
   }
 
   send(req, res, view) {
-    res.status(view.status || 200).type('html').send(this.render(req, view));
+    const status = view.status || 200;
+    // Nur allgemeine, nicht personalisierte Seiten dürfen zwischengespeichert werden
+    if (status === 200 && !view.noindex && view.cache !== false) res.locals.cacheable = true;
+    res.status(status).type('html').send(this.render(req, view));
   }
 
   /** Einfache Meldungsseite (z. B. „Anmeldung bestätigt“). */

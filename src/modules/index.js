@@ -7,6 +7,7 @@ import menus from './menus/index.js';
 import newsletter from './newsletter/index.js';
 import pages from './pages/index.js';
 import redirects from './redirects/index.js';
+import stats from './stats/index.js';
 
 // Reihenfolge zählt für Fallback-Routen: erst Seiten, dann Weiterleitungen.
-export const builtinModules = [media, pages, blog, forms, menus, redirects, newsletter];
+export const builtinModules = [media, pages, blog, forms, menus, redirects, stats, newsletter];
