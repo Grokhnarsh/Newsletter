@@ -8,7 +8,7 @@ const CORE_TABS = [
   { id: 'modules', label: 'Module', order: 80, adminOnly: true, render: modulesTab },
   { id: 'users', label: 'Benutzer', order: 90, adminOnly: true, render: usersTab },
   { id: 'api', label: 'API', order: 95, adminOnly: true, render: apiTab },
-  { id: 'backup', label: 'Backup', order: 96, adminOnly: true, render: backupTab },
+  { id: 'backup', label: 'Backup & Wartung', order: 96, adminOnly: true, render: backupTab },
   { id: 'audit', label: 'Protokoll', order: 97, adminOnly: true, render: auditTab },
 ];
 
@@ -262,6 +262,11 @@ async function backupTab(box) {
           : html`<tr><td colspan="4" class="empty">Noch keine Backups auf dem Server.</td></tr>`
       }</tbody></table></div>
     </div>
+    <div class="card">
+      <h2>Suchindex</h2>
+      <p class="muted">Die Website-Suche aktualisiert sich automatisch. Nach einer Wiederherstellung oder einem Import kann der Index hier neu aufgebaut werden.</p>
+      <button class="btn" id="reindex">Suchindex neu aufbauen</button>
+    </div>
     <form class="card" id="backup-settings">
       <h2>Automatische Backups</h2>
       <div class="inline-fields">
@@ -281,6 +286,14 @@ async function backupTab(box) {
     } catch (err) {
       toastError(err);
       e.target.disabled = false;
+    }
+  });
+  $('#reindex', box).addEventListener('click', async () => {
+    try {
+      const r = await post('/system/search/rebuild');
+      toast(`Suchindex mit ${r.documents} Dokumenten neu aufgebaut`);
+    } catch (err) {
+      toastError(err);
     }
   });
   $$('[data-del]', box).forEach((b) =>

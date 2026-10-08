@@ -26,8 +26,19 @@ const postSchema = {
 const PUBLISHED = "p.status = 'published' AND p.published_at <= ?";
 
 export class PostService {
-  constructor({ db, content, settings, site, hooks }) {
-    Object.assign(this, { db, content, settings, site, hooks });
+  constructor({ db, content, settings, site, hooks, search }) {
+    Object.assign(this, { db, content, settings, site, hooks, search });
+  }
+
+  searchDocument(p) {
+    return { entity: 'post', id: p.id, title: p.title, html: p.content, text: p.excerpt, url: this.publicUrl(p, false), published_at: p.published_at };
+  }
+
+  /** Veröffentlichte Beiträge im Suchindex halten (geplante erscheinen erst ab ihrem Datum). */
+  indexPost(post) {
+    if (!this.search) return;
+    if (post.status === 'published') this.search.index('post', post.id, this.searchDocument(post));
+    else this.search.remove('post', post.id);
   }
 
   publicUrl(post, absolute = true) {
@@ -146,13 +157,16 @@ export class PostService {
         t,
       );
       if (d.category_ids) this.setCategories(id, d.category_ids);
-      return this.find(id);
+      const post = this.find(id);
+      this.indexPost(post);
+      return post;
     });
   }
 
   update(id, data, userId) {
     const existing = this.find(id);
     const post = this.updateRow(existing, data, userId);
+    this.indexPost(post);
     // Neue Adresse eines veröffentlichten Beitrags melden (automatische Weiterleitung)
     if (existing.status === 'published' && post.status === 'published' && post.slug !== existing.slug) {
       this.hooks.collect('content.moved', [{ from: this.publicUrl(existing, false), to: this.publicUrl(post, false) }]);
@@ -191,6 +205,7 @@ export class PostService {
     this.find(id);
     this.db.run('DELETE FROM posts WHERE id = ?', id);
     this.content.deleteRevisions('post', id);
+    this.search?.remove('post', id);
   }
 
   // ---- Kategorien ----
@@ -221,11 +236,8 @@ export class PostService {
     if (!changes) throw notFound('Kategorie nicht gefunden');
   }
 
-  search(q) {
-    const like = `%${q}%`;
-    return this.db
-      .all(`SELECT p.* FROM posts p WHERE ${PUBLISHED} AND (p.title LIKE ? OR p.content LIKE ? OR p.excerpt LIKE ?) ORDER BY p.published_at DESC LIMIT 20`, now(), like, like, like)
-      .map((p) => ({ type: 'Beitrag', title: p.title, url: this.publicUrl(p, false), excerpt: p.excerpt || excerpt(p.content, 160) }));
+  searchDocuments() {
+    return this.db.all("SELECT * FROM posts WHERE status = 'published'").map((p) => this.searchDocument(p));
   }
 }
 
@@ -352,7 +364,8 @@ export default {
       { ...opts, priority: 20 },
     );
     hooks.on('site.head', () => `<link rel="alternate" type="application/rss+xml" title="${escapeHtml(settings.get('site_name'))}" href="/blog/feed.xml">`, opts);
-    hooks.on('site.search', (q) => ctx.posts.search(q), opts);
+    ctx.search.registerType('post', 'Beitrag', 'blog');
+    hooks.on('search.documents', () => ctx.posts.searchDocuments(), opts);
     hooks.on(
       'site.sitemap',
       () => [

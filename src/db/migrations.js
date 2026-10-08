@@ -106,4 +106,15 @@ export const coreMigrations = [
       CREATE INDEX idx_audit_user ON audit_log(user_id);
     `,
   },
+  {
+    // Volltextsuche
+    version: 4,
+    sql: `
+      CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
+        entity UNINDEXED, entity_id UNINDEXED, url UNINDEXED, published_at UNINDEXED, lang UNINDEXED,
+        title, body,
+        tokenize = 'unicode61 remove_diacritics 2'
+      );
+    `,
+  },
 ];

@@ -5,6 +5,7 @@ import { BACKUP_SETTINGS, BackupService } from './core/backup.js';
 import { ContentService } from './core/content.js';
 import { HookBus } from './core/hooks.js';
 import { MAIL_SETTINGS, SystemMail } from './core/mail.js';
+import { SearchService } from './core/search.js';
 import { ModuleManager } from './core/modules.js';
 import { authRoutes } from './core/routes/auth.js';
 import { systemRoutes } from './core/routes/system.js';
@@ -44,10 +45,14 @@ export async function createCms({ db, config, mailer, logger = console, modules:
 
   // Gemeinsamer Kontext; Module hängen ihre Services direkt an (z. B. ctx.subscribers).
   const backups = new BackupService({ db, config, settings, modules: manager, logger });
-  const ctx = { db, config, mailer, logger, settings, hooks, content, site, users, audit, systemMail, backups, modules: manager };
+  const search = new SearchService({ db, hooks });
+  const ctx = { db, config, mailer, logger, settings, hooks, content, site, users, audit, systemMail, backups, search, modules: manager };
+  site.search = search;
   // Einmaliger Einrichtungscode: ohne ihn kann niemand das erste Administratorkonto anlegen.
   ctx.setupToken = config.setupToken || randomToken(12);
   manager.setup(ctx);
+  // Suchindex beim ersten Start (oder nach einem Update ohne Index) aufbauen
+  if (search.isEmpty()) search.rebuild();
 
   const app = express();
   app.disable('x-powered-by');

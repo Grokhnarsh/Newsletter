@@ -27,10 +27,8 @@ const pageSchema = {
 };
 
 export class PageService {
-  constructor({ db, content, hooks }) {
-    this.db = db;
-    this.content = content;
-    this.hooks = hooks;
+  constructor({ db, content, hooks, search, settings }) {
+    Object.assign(this, { db, content, hooks, search, settings });
   }
 
   reservedSlugs() {
@@ -162,6 +160,7 @@ export class PageService {
       t,
       status === 'published' ? t : null,
     );
+    this.reindex();
     return this.find(id);
   }
 
@@ -185,6 +184,7 @@ export class PageService {
     const before = this.publishedPaths();
     const page = this.updateRow(id, data, userId);
     this.reportMoves(before);
+    this.reindex();
     return page;
   }
 
@@ -225,13 +225,27 @@ export class PageService {
     });
     before.delete(id);
     this.reportMoves(before);
+    this.reindex();
   }
 
-  search(q) {
-    const like = `%${q}%`;
-    return this.db
-      .all("SELECT * FROM pages WHERE status = 'published' AND (title LIKE ? OR content LIKE ?) ORDER BY title LIMIT 20", like, like)
-      .map((p) => ({ type: 'Seite', title: p.title, url: this.pathFor(p), excerpt: p.seo_description || excerpt(p.content, 160) }));
+  /** Alle veröffentlichten Seiten als Dokumente für die Volltextsuche. */
+  searchDocuments() {
+    const home = this.settings?.get('home_page_id');
+    return this.tree()
+      .filter((p) => p.status === 'published')
+      .map((p) => {
+        const row = this.db.get('SELECT content, seo_description FROM pages WHERE id = ?', p.id);
+        return { entity: 'page', id: p.id, title: p.title, html: row.content, text: row.seo_description, url: p.id === home ? '/' : p.path };
+      });
+  }
+
+  /** Suchindex der Seiten erneuern (Pfade von Unterseiten können sich mitändern). */
+  reindex() {
+    if (!this.search) return;
+    this.db.transaction(() => {
+      this.db.run("DELETE FROM search_index WHERE entity = 'page'");
+      for (const d of this.searchDocuments()) this.search.index('page', d.id, d);
+    });
   }
 }
 
@@ -309,7 +323,8 @@ export default {
       },
       { ...opts, priority: 5 },
     );
-    hooks.on('site.search', (q) => ctx.pages.search(q), opts);
+    ctx.search.registerType('page', 'Seite', 'pages');
+    hooks.on('search.documents', () => ctx.pages.searchDocuments(), opts);
     hooks.on(
       'site.sitemap',
       () =>

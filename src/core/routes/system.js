@@ -86,6 +86,11 @@ ${systemMail.button(url, 'Passwort festlegen')}
     res.json({ ok: true });
   });
 
+  // ---- Suchindex ----
+  router.post('/system/search/rebuild', requireAdmin, (req, res) => {
+    res.json({ documents: ctx.search.rebuild() });
+  });
+
   // ---- Backups ----
   router.get('/system/backups', requireAdmin, (req, res) => res.json(backups.list()));
 

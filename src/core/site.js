@@ -123,7 +123,14 @@ export class SiteService {
 
     router.get('/suche', (req, res) => {
       const q = String(req.query.q || '').trim().slice(0, 100);
-      const results = q.length >= 2 ? this.hooks.collect('site.search', q) : [];
+      // Volltextindex plus Treffer von Modulen, die eigene Suchen anbieten
+      const results =
+        q.length >= 2
+          ? [
+              ...(this.search?.query(q) || []),
+              ...this.hooks.collect('site.search', q).map((r) => ({ ...r, excerptHtml: escapeHtml(r.excerpt || '') })),
+            ]
+          : [];
       this.send(req, res, {
         title: q ? `Suche: ${q}` : 'Suche',
         noindex: true,
@@ -135,7 +142,7 @@ export class SiteService {
                 ? `<p class="muted">${results.length} Treffer</p><ul class="search-results">${results
                     .map(
                       (r) =>
-                        `<li><span class="tag">${escapeHtml(r.type)}</span> <a href="${escapeHtml(r.url)}">${escapeHtml(r.title)}</a>${r.excerpt ? `<p>${escapeHtml(r.excerpt)}</p>` : ''}</li>`,
+                        `<li><span class="tag">${escapeHtml(r.type)}</span> <a href="${escapeHtml(r.url)}">${escapeHtml(r.title)}</a>${r.excerptHtml ? `<p>${r.excerptHtml}</p>` : ''}</li>`,
                     )
                     .join('')}</ul>`
                 : '<p>Keine Treffer gefunden.</p>'
