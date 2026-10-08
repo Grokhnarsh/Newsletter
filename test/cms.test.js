@@ -90,7 +90,7 @@ describe('Module', () => {
     assert.ok(pages.find((p) => p.is_home && p.status === 'published'));
     assert.equal((await t.get('/api/posts')).data.total, 1);
     const menus = (await t.get('/api/menus')).data;
-    assert.deepEqual(menus.find((m) => m.location === 'main').items.map((i) => i.label), ['Start', 'Über uns', 'Blog', 'Newsletter']);
+    assert.deepEqual(menus.find((m) => m.location === 'main').items.map((i) => i.label), ['Start', 'Über uns', 'Blog', 'Kontakt', 'Newsletter']);
   });
 
   test('Admin-Skripte der Module werden ausgeliefert', async () => {
@@ -342,18 +342,18 @@ describe('Menüs & Website', () => {
 
   test('Menü mit Untereinträgen; Entwürfe werden ausgeblendet', async () => {
     const draft = (await t.post('/api/pages', { title: 'Bald' })).data;
-    const pub = (await t.post('/api/pages', { title: 'Kontakt', status: 'published' })).data;
+    const pub = (await t.post('/api/pages', { title: 'Anfahrt', status: 'published' })).data;
     const saved = await t.put('/api/menus/main', {
       items: [
         { type: 'home', label: 'Start' },
-        { type: 'page', label: 'Kontakt', target_id: pub.id, children: [{ type: 'custom', label: 'Extern', url: 'https://example.org', new_tab: true }] },
+        { type: 'page', label: 'Anfahrt', target_id: pub.id, children: [{ type: 'custom', label: 'Extern', url: 'https://example.org', new_tab: true }] },
         { type: 'page', label: 'Bald', target_id: draft.id },
       ],
     });
     assert.equal(saved.status, 200);
     assert.equal(saved.data[1].children.length, 1);
     const html = (await t.get('/', { auth: false })).data;
-    assert.match(html, /href="\/kontakt"/);
+    assert.match(html, /href="\/anfahrt"/);
     assert.match(html, /class="submenu".*href="https:\/\/example.org" target="_blank" rel="noopener noreferrer"/s);
     assert.doesNotMatch(html, />Bald</);
   });

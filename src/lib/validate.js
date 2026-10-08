@@ -82,6 +82,10 @@ export function validate(input, schema, { partial = false } = {}) {
         else out[key] = [...new Set(ids)];
         break;
       }
+      case 'array':
+        if (!Array.isArray(value)) errors[key] = 'Muss eine Liste sein';
+        else out[key] = value;
+        break;
       case 'object':
         if (typeof value !== 'object' || Array.isArray(value)) errors[key] = 'Muss ein Objekt sein';
         else out[key] = value;

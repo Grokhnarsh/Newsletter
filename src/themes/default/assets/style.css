@@ -172,3 +172,16 @@ address { font-style: normal; color: var(--muted); }
 .top-widgets { background: var(--accent); color: #fff; }
 .notice-banner { max-width: var(--wrap); margin: 0 auto; padding: 10px 20px; text-align: center; font-weight: 550; font-size: 0.95rem; }
 .notice-banner a { color: #fff; font-weight: 700; margin-left: 8px; }
+
+/* Formulare (Modul „Formulare“) */
+.cms-form { max-width: 640px; margin: 24px 0; }
+.cms-form .form-field { margin-bottom: 16px; border: 0; padding: 0; }
+.cms-form legend { font-weight: 600; font-size: 0.9rem; margin-bottom: 6px; }
+.cms-form select, .cms-form textarea, .cms-form input[type=tel], .cms-form input[type=number], .cms-form input[type=date] {
+  width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font: inherit;
+}
+.cms-form [aria-invalid=true] { border-color: var(--err); }
+.field-error { color: var(--err); font-size: 0.88rem; margin-top: 4px; }
+.form-message { font-weight: 600; }
+.form-success { padding: 18px 20px; border-radius: var(--radius); background: var(--surface); border: 1px solid var(--ok); color: var(--text); margin: 24px 0; }
+.form-success p { margin: 0; }

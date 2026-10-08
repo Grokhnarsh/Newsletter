@@ -131,6 +131,8 @@ export default {
         const about = ctx.modules.isEnabled('pages') && ctx.db.get("SELECT id FROM pages WHERE slug = 'ueber-uns' AND parent_id IS NULL");
         if (about) items.push({ type: 'page', label: 'Über uns', target_id: about.id });
         if (ctx.modules.isEnabled('blog')) items.push({ type: 'blog', label: 'Blog' });
+        const contact = ctx.modules.isEnabled('pages') && ctx.db.get("SELECT id FROM pages WHERE slug = 'kontakt' AND parent_id IS NULL");
+        if (contact) items.push({ type: 'page', label: 'Kontakt', target_id: contact.id });
         if (ctx.modules.isEnabled('newsletter')) items.push({ type: 'custom', label: 'Newsletter', url: '/subscribe' });
         ctx.menus.replace('main', items);
         const footer = [];
