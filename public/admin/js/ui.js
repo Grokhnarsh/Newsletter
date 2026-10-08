@@ -80,6 +80,7 @@ export const CAMPAIGN_STATUS = {
 
 export const RECIPIENT_STATUS = {
   queued: 'Wartend',
+  held: 'Wartet auf A/B-Ergebnis',
   sent: 'Zugestellt',
   failed: 'Fehlgeschlagen',
   skipped: 'Übersprungen',
@@ -88,7 +89,7 @@ export const RECIPIENT_STATUS = {
 const BADGE_TONE = {
   active: 'good', sent: 'good', pending: 'warn', scheduled: 'info', sending: 'info', paused: 'warn',
   unsubscribed: 'muted', draft: 'muted', cancelled: 'muted', bounced: 'bad', complained: 'bad', failed: 'bad',
-  queued: 'info', skipped: 'muted',
+  queued: 'info', skipped: 'muted', held: 'warn',
 };
 
 export function badge(status, labels = {}) {

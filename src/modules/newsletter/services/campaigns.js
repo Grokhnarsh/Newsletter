@@ -6,6 +6,7 @@ export const CAMPAIGN_STATUSES = ['draft', 'scheduled', 'sending', 'paused', 'se
 const EDITABLE_FIELDS = [
   'name', 'subject', 'preheader', 'from_name', 'from_email', 'reply_to', 'content_html',
   'content_text', 'template_id', 'track_opens', 'track_clicks', 'archive',
+  'segment_id', 'subject_b', 'ab_test_percent', 'ab_wait_hours', 'ab_metric',
 ];
 const BOOL_FIELDS = new Set(['track_opens', 'track_clicks', 'archive']);
 
@@ -14,6 +15,7 @@ const STATS_SELECT = `
   (SELECT COUNT(*) FROM campaign_recipients r WHERE r.campaign_id = c.id AND r.status = 'sent') AS sent_count,
   (SELECT COUNT(*) FROM campaign_recipients r WHERE r.campaign_id = c.id AND r.status = 'failed') AS failed_count,
   (SELECT COUNT(*) FROM campaign_recipients r WHERE r.campaign_id = c.id AND r.status = 'queued') AS queued_count,
+  (SELECT COUNT(*) FROM campaign_recipients r WHERE r.campaign_id = c.id AND r.status = 'held') AS held_count,
   (SELECT COUNT(*) FROM campaign_recipients r WHERE r.campaign_id = c.id AND r.opened_at IS NOT NULL) AS unique_opens,
   (SELECT COUNT(*) FROM campaign_recipients r WHERE r.campaign_id = c.id AND r.clicked_at IS NOT NULL) AS unique_clicks,
   (SELECT COUNT(*) FROM events e WHERE e.campaign_id = c.id AND e.type = 'unsubscribed') AS unsubscribes`;
@@ -33,11 +35,15 @@ function shape(row) {
   return out;
 }
 
+/** Kampagne mit A/B-Test des Betreffs? */
+export const isAbTest = (c) => Boolean(c.subject_b?.trim()) && c.ab_test_percent > 0;
+
 export class CampaignService {
-  constructor(db, { templates, settings }) {
+  constructor(db, { templates, settings, segments }) {
     this.db = db;
     this.templates = templates;
     this.settings = settings;
+    this.segments = segments;
   }
 
   /** Layout-HTML der Kampagne (eigene Vorlage, sonst Standardvorlage aus den Einstellungen). */
@@ -50,7 +56,7 @@ export class CampaignService {
     if (status && !CAMPAIGN_STATUSES.includes(status)) throw badRequest('Ungültiger Status');
     const rows = this.db.all(
       `SELECT c.id, c.name, c.subject, c.status, c.scheduled_at, c.started_at, c.finished_at, c.created_at, c.updated_at,
-         c.archive, c.track_opens, c.track_clicks, ${STATS_SELECT},
+         c.archive, c.track_opens, c.track_clicks, c.segment_id, c.subject_b, c.ab_test_percent, c.ab_winner, ${STATS_SELECT},
          (SELECT GROUP_CONCAT(list_id) FROM campaign_lists WHERE campaign_id = c.id) AS list_ids
        FROM campaigns c ${status ? 'WHERE c.status = ?' : ''} ORDER BY COALESCE(c.started_at, c.scheduled_at, c.created_at) DESC, c.id DESC`,
       ...(status ? [status] : []),
@@ -78,8 +84,9 @@ export class CampaignService {
     return this.db.transaction(() => {
       const { lastInsertRowid: id } = this.db.run(
         `INSERT INTO campaigns (name, subject, preheader, from_name, from_email, reply_to, content_html, content_text,
-           template_id, track_opens, track_clicks, archive, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           template_id, track_opens, track_clicks, archive, segment_id, subject_b, ab_test_percent, ab_wait_hours, ab_metric,
+           created_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         data.name,
         data.subject || '',
         data.preheader || '',
@@ -92,6 +99,11 @@ export class CampaignService {
         data.track_opens === false ? 0 : 1,
         data.track_clicks === false ? 0 : 1,
         data.archive ? 1 : 0,
+        data.segment_id || null,
+        data.subject_b || '',
+        data.ab_test_percent || 0,
+        data.ab_wait_hours ?? 4,
+        data.ab_metric || 'opens',
         userId ?? null,
         t,
         t,
@@ -114,7 +126,7 @@ export class CampaignService {
       for (const field of EDITABLE_FIELDS) {
         if (data[field] === undefined) continue;
         sets.push(`${field} = ?`);
-        params.push(BOOL_FIELDS.has(field) ? (data[field] ? 1 : 0) : data[field] ?? (field === 'template_id' ? null : ''));
+        params.push(BOOL_FIELDS.has(field) ? (data[field] ? 1 : 0) : data[field] ?? (['template_id', 'segment_id'].includes(field) ? null : ''));
       }
       sets.push('updated_at = ?');
       params.push(now(), id);
@@ -135,22 +147,39 @@ export class CampaignService {
     return this.create({ ...c, name: `${c.name} (Kopie)`, list_ids: c.list_ids }, userId);
   }
 
-  /** Anzahl eindeutiger aktiver Abonnenten in den angegebenen Listen. */
-  audienceCount(listIds) {
-    if (!listIds.length) return 0;
-    return this.db.get(
-      `SELECT COUNT(DISTINCT s.id) AS n FROM subscribers s JOIN subscriber_lists sl ON sl.subscriber_id = s.id
-       WHERE s.status = 'active' AND sl.list_id IN (${listIds.map(() => '?').join(',')})`,
-      ...listIds,
-    ).n;
+  /**
+   * Zielgruppe als SQL-Bedingung über `subscribers s`: aktive Abonnenten aus den Listen,
+   * eingeschränkt auf das Segment. Ohne Listen gilt das Segment für alle Abonnenten.
+   */
+  audience({ list_ids = [], segment_id = null }) {
+    const where = ["s.status = 'active'"];
+    const params = [];
+    if (list_ids.length) {
+      where.push(`EXISTS (SELECT 1 FROM subscriber_lists sl WHERE sl.subscriber_id = s.id AND sl.list_id IN (${list_ids.map(() => '?').join(',')}))`);
+      params.push(...list_ids);
+    }
+    if (segment_id) {
+      const c = this.segments.condition(segment_id);
+      where.push(c.sql);
+      params.push(...c.params);
+    }
+    return { sql: where.join(' AND '), params, empty: !list_ids.length && !segment_id };
+  }
+
+  /** Anzahl eindeutiger aktiver Empfänger (Listen und/oder Segment). */
+  audienceCount(target) {
+    const a = this.audience(Array.isArray(target) ? { list_ids: target } : target);
+    if (a.empty) return 0;
+    return this.db.get(`SELECT COUNT(*) AS n FROM subscribers s WHERE ${a.sql}`, ...a.params).n;
   }
 
   assertSendable(campaign) {
     const problems = [];
     if (!campaign.subject.trim()) problems.push('Betreff fehlt');
     if (!campaign.content_html.trim()) problems.push('Inhalt fehlt');
-    if (!campaign.list_ids.length) problems.push('Keine Empfängerliste ausgewählt');
-    else if (this.audienceCount(campaign.list_ids) === 0) problems.push('Die ausgewählten Listen enthalten keine aktiven Abonnenten');
+    if (!campaign.list_ids.length && !campaign.segment_id) problems.push('Keine Empfängerliste und kein Segment ausgewählt');
+    else if (this.audienceCount(campaign) === 0) problems.push('Die Zielgruppe enthält keine aktiven Abonnenten');
+    if (campaign.ab_test_percent > 0 && !campaign.subject_b.trim()) problems.push('Für den A/B-Test fehlt Betreff B');
     if (problems.length) throw badRequest(`Kampagne kann nicht versendet werden: ${problems.join(', ')}`, { problems });
   }
 
@@ -178,16 +207,17 @@ export class CampaignService {
     const campaign = this.find(id);
     if (!['draft', 'scheduled'].includes(campaign.status)) throw conflict('Kampagne wurde bereits gestartet');
     this.assertSendable(campaign);
+    const ab = isAbTest(campaign);
     return this.db.transaction(() => {
-      const placeholders = campaign.list_ids.map(() => '?').join(',');
+      const a = this.audience(campaign);
       this.db.run(
         `INSERT OR IGNORE INTO campaign_recipients (campaign_id, subscriber_id, token, status)
-         SELECT ?, s.id, lower(hex(randomblob(16))), 'queued' FROM subscribers s
-         WHERE s.status = 'active' AND EXISTS (
-           SELECT 1 FROM subscriber_lists sl WHERE sl.subscriber_id = s.id AND sl.list_id IN (${placeholders}))`,
+         SELECT ?, s.id, lower(hex(randomblob(16))), ? FROM subscribers s WHERE ${a.sql}`,
         id,
-        ...campaign.list_ids,
+        ab ? 'held' : 'queued',
+        ...a.params,
       );
+      if (ab) this.startAbTest(campaign);
       for (const url of extractLinks(applyLayout(this.layoutFor(campaign), campaign.content_html))) {
         this.db.run('INSERT OR IGNORE INTO links (campaign_id, url) VALUES (?, ?)', id, url);
       }
@@ -195,6 +225,74 @@ export class CampaignService {
       this.db.run("UPDATE campaigns SET status = 'sending', started_at = ?, scheduled_at = COALESCE(scheduled_at, ?), updated_at = ? WHERE id = ?", t, t, t, id);
       return this.find(id);
     });
+  }
+
+  // ---- A/B-Test des Betreffs ----
+
+  /**
+   * Zufällige Testgruppe: je die Hälfte bekommt Betreff A bzw. B, der Rest wird
+   * zurückgehalten, bis nach der Wartezeit der Gewinner feststeht.
+   */
+  startAbTest(campaign) {
+    const ids = this.db.all("SELECT id FROM campaign_recipients WHERE campaign_id = ? AND status = 'held' ORDER BY random()", campaign.id).map((r) => r.id);
+    const testSize = Math.min(ids.length, Math.max(2, Math.round((ids.length * campaign.ab_test_percent) / 100)));
+    const half = Math.ceil(testSize / 2);
+    const mark = (slice, variant) => {
+      for (let i = 0; i < slice.length; i += 500) {
+        const chunk = slice.slice(i, i + 500);
+        this.db.run(`UPDATE campaign_recipients SET status = 'queued', variant = ? WHERE id IN (${chunk.map(() => '?').join(',')})`, variant, ...chunk);
+      }
+    };
+    mark(ids.slice(0, half), 'a');
+    mark(ids.slice(half, testSize), 'b');
+    const endsAt = new Date(Date.now() + campaign.ab_wait_hours * 3600_000).toISOString();
+    this.db.run('UPDATE campaigns SET ab_test_ends_at = ?, ab_winner = NULL WHERE id = ?', endsAt, campaign.id);
+  }
+
+  /** Öffnungs- und Klickraten je Variante. */
+  abResults(id) {
+    const rows = this.db.all(
+      `SELECT variant, COUNT(*) AS recipients, SUM(status = 'sent') AS sent,
+         SUM(opened_at IS NOT NULL) AS opens, SUM(clicked_at IS NOT NULL) AS clicks
+       FROM campaign_recipients WHERE campaign_id = ? AND variant IS NOT NULL GROUP BY variant`,
+      id,
+    );
+    const out = {};
+    for (const v of ['a', 'b']) {
+      const r = rows.find((x) => x.variant === v) || { recipients: 0, sent: 0, opens: 0, clicks: 0 };
+      out[v] = { recipients: r.recipients, sent: r.sent || 0, opens: r.opens || 0, clicks: r.clicks || 0, open_rate: rate(r.opens, r.sent), click_rate: rate(r.clicks, r.sent) };
+    }
+    return out;
+  }
+
+  /** Gewinner festlegen und zurückgehaltene Empfänger mit diesem Betreff freigeben. */
+  setAbWinner(id, variant) {
+    const campaign = this.find(id);
+    if (!isAbTest(campaign)) throw badRequest('Diese Kampagne hat keinen A/B-Test');
+    if (campaign.ab_winner) throw conflict('Der Gewinner steht bereits fest');
+    if (!['a', 'b'].includes(variant)) throw badRequest('Variante muss „a“ oder „b“ sein');
+    this.db.transaction(() => {
+      this.db.run('UPDATE campaigns SET ab_winner = ?, updated_at = ? WHERE id = ?', variant, now(), id);
+      this.db.run("UPDATE campaign_recipients SET status = 'queued', variant = ? WHERE campaign_id = ? AND status = 'held'", variant, id);
+      this.db.run(
+        "INSERT INTO events (type, campaign_id, data, created_at) VALUES ('ab_winner', ?, ?, ?)",
+        id,
+        JSON.stringify({ variant, results: this.abResults(id) }),
+        now(),
+      );
+    });
+    return this.find(id);
+  }
+
+  /** Abgelaufene Tests auswerten (Gleichstand → A). */
+  decideAbTests() {
+    const due = this.db.all("SELECT id, ab_metric FROM campaigns WHERE status = 'sending' AND ab_winner IS NULL AND ab_test_ends_at <= ?", now());
+    for (const c of due) {
+      const r = this.abResults(c.id);
+      const key = c.ab_metric === 'clicks' ? 'click_rate' : 'open_rate';
+      this.setAbWinner(c.id, r.b[key] > r.a[key] ? 'b' : 'a');
+    }
+    return due.length;
   }
 
   pause(id) {
@@ -215,7 +313,7 @@ export class CampaignService {
     const campaign = this.find(id);
     if (!['scheduled', 'sending', 'paused'].includes(campaign.status)) throw conflict('Kampagne kann nicht abgebrochen werden');
     this.db.transaction(() => {
-      this.db.run("UPDATE campaign_recipients SET status = 'skipped', error = 'Kampagne abgebrochen' WHERE campaign_id = ? AND status = 'queued'", id);
+      this.db.run("UPDATE campaign_recipients SET status = 'skipped', error = 'Kampagne abgebrochen' WHERE campaign_id = ? AND status IN ('queued', 'held')", id);
       this.db.run("UPDATE campaigns SET status = 'cancelled', finished_at = ?, updated_at = ? WHERE id = ?", now(), now(), id);
     });
     return this.find(id);
@@ -249,7 +347,7 @@ export class CampaignService {
     return this.db.run(
       `UPDATE campaigns SET status = 'sent', finished_at = ?, updated_at = ?
        WHERE status = 'sending' AND NOT EXISTS (
-         SELECT 1 FROM campaign_recipients r WHERE r.campaign_id = campaigns.id AND r.status = 'queued')`,
+         SELECT 1 FROM campaign_recipients r WHERE r.campaign_id = campaigns.id AND r.status IN ('queued', 'held'))`,
       t,
       t,
     ).changes;
@@ -281,6 +379,7 @@ export class CampaignService {
     ).n;
     return {
       campaign,
+      ab: isAbTest(campaign) ? this.abResults(id) : null,
       totals: { ...totals, bounces, click_to_open_rate: rate(campaign.unique_clicks, campaign.unique_opens) },
       links,
       timeline,
@@ -304,7 +403,7 @@ export class CampaignService {
     const from = `FROM campaign_recipients r LEFT JOIN subscribers s ON s.id = r.subscriber_id WHERE ${where.join(' AND ')}`;
     const total = this.db.get(`SELECT COUNT(*) AS n ${from}`, ...params).n;
     const items = this.db.all(
-      `SELECT r.id, r.subscriber_id, COALESCE(s.email, '(gelöscht)') AS email, r.status, r.attempts, r.error, r.sent_at,
+      `SELECT r.id, r.subscriber_id, COALESCE(s.email, '(gelöscht)') AS email, r.status, r.variant, r.attempts, r.error, r.sent_at,
          r.opened_at, r.open_count, r.clicked_at, r.click_count ${from} ORDER BY r.id LIMIT ? OFFSET ?`,
       ...params,
       perPage,

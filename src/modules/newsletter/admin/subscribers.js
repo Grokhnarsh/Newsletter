@@ -16,6 +16,8 @@ const EVENT_LABELS = {
   open: 'Geöffnet',
   click: 'Link geklickt',
   preferences_updated: 'Einstellungen geändert',
+  tracking_consent_given: 'Tracking-Einwilligung erteilt',
+  tracking_consent_withdrawn: 'Tracking-Einwilligung widerrufen',
 };
 
 function subscriberForm(lists, s = {}) {
@@ -311,6 +313,7 @@ export async function subscriberDetailView(el, id) {
             <dt>Angelegt</dt><dd>${fmtDateTime(s.created_at)}</dd>
             <dt>Einwilligung</dt><dd>${fmtDateTime(s.consent_at)}${s.ip ? ` (IP ${s.ip})` : ''}</dd>
             <dt>Bestätigt</dt><dd>${fmtDateTime(s.confirmed_at)}</dd>
+            <dt>Tracking</dt><dd>${s.tracking_consent ? `eingewilligt am ${fmtDateTime(s.tracking_consent_at)}` : s.tracking_consent_at ? `widerrufen am ${fmtDateTime(s.tracking_consent_at)}` : 'keine Einwilligung'}</dd>
             <dt>Abgemeldet</dt><dd>${fmtDateTime(s.unsubscribed_at)}</dd>
             ${Object.entries(s.attributes).map(([k, v]) => html`<dt>${k}</dt><dd>${typeof v === 'object' ? JSON.stringify(v) : v}</dd>`)}
           </dl>

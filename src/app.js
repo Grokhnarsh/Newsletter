@@ -87,7 +87,7 @@ export async function createCms({ db, config, mailer, logger = console, modules:
   api.use(auditMiddleware(audit));
   // Jede erfolgreiche Änderung leert den Seiten-Cache der Website
   api.use((req, res, next) => {
-    if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) res.on('finish', () => res.statusCode < 400 && cache.clear());
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) res.on('finish', () => res.statusCode < 400 && req.auth && cache.clear());
     next();
   });
   api.use('/auth', authRoutes(ctx, auth));

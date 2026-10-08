@@ -92,7 +92,7 @@ export async function campaignsView(el) {
 // Editor
 
 export async function campaignEditorView(el, id) {
-  const [lists, templates, settings] = await Promise.all([ctx.getLists(true), get('/templates'), ctx.getSettings()]);
+  const [lists, templates, settings, segments] = await Promise.all([ctx.getLists(true), get('/templates'), ctx.getSettings(), get('/segments')]);
   let campaign = id
     ? await get(`/campaigns/${id}`)
     : {
@@ -110,6 +110,11 @@ export async function campaignEditorView(el, id) {
         reply_to: '',
         content_text: '',
         status: 'draft',
+        segment_id: null,
+        subject_b: '',
+        ab_test_percent: 0,
+        ab_wait_hours: 4,
+        ab_metric: 'opens',
       };
   if (!['draft', 'scheduled'].includes(campaign.status)) return navigate(`#/campaigns/${id}/report`);
   let dirty = false;
@@ -133,6 +138,19 @@ export async function campaignEditorView(el, id) {
           <div class="card">
             <div class="field"><label for="c-name">Interner Name *</label><input id="c-name" name="name" type="text" required value="${campaign.name}" placeholder="z. B. Newsletter Oktober"></div>
             <div class="field"><label for="c-subject">Betreff *</label><input id="c-subject" name="subject" type="text" value="${campaign.subject}" placeholder="Was gibt es Neues?"></div>
+            <details ${campaign.subject_b ? raw('open') : ''} style="margin-bottom:14px">
+              <summary class="small" style="cursor:pointer;font-weight:600">A/B-Test des Betreffs</summary>
+              <p class="muted small" style="margin:8px 0">Ein Teil der Empfänger erhält zufällig Betreff A oder B. Nach der Wartezeit bekommen alle übrigen den Betreff mit der besseren Öffnungs- bzw. Klickrate.</p>
+              <div class="field"><label for="c-subject-b">Betreff B</label><input id="c-subject-b" name="subject_b" type="text" value="${campaign.subject_b}" placeholder="Alternative Betreffzeile"></div>
+              <div class="inline-fields">
+                <div class="field"><label for="c-ab-pct">Testgruppe (%)</label><input id="c-ab-pct" name="ab_test_percent" type="number" min="0" max="100" value="${campaign.ab_test_percent}"><div class="help">0 = kein Test, z. B. 20 = je 10 % A und B</div></div>
+                <div class="field"><label for="c-ab-wait">Wartezeit (Stunden)</label><input id="c-ab-wait" name="ab_wait_hours" type="number" min="1" max="168" value="${campaign.ab_wait_hours}"></div>
+                <div class="field"><label for="c-ab-metric">Gewinner nach</label><select id="c-ab-metric" name="ab_metric">
+                  <option value="opens" ${campaign.ab_metric === 'opens' ? raw('selected') : ''}>Öffnungsrate</option>
+                  <option value="clicks" ${campaign.ab_metric === 'clicks' ? raw('selected') : ''}>Klickrate</option>
+                </select></div>
+              </div>
+            </details>
             <div class="field"><label for="c-pre">Vorschautext (Preheader)</label><input id="c-pre" name="preheader" type="text" value="${campaign.preheader}"><div class="help">Wird in vielen Postfächern neben dem Betreff angezeigt.</div></div>
             <div class="inline-fields">
               <div class="field"><label>Empfängerlisten</label>
@@ -143,6 +161,11 @@ export async function campaignEditorView(el, id) {
                       )
                     : html`<span class="muted">Keine Listen – <a href="#/lists">Liste anlegen</a></span>`
                 }</div>
+                <div class="field" style="margin-top:10px"><label for="c-segment">Segment (optional)</label>
+                  <select id="c-segment" name="segment_id"><option value="">– kein Segment –</option>${segments.map(
+                    (sg) => html`<option value="${sg.id}" ${campaign.segment_id === sg.id ? raw('selected') : ''}>${sg.name} (${fmtNum(sg.count)})</option>`,
+                  )}</select>
+                  <div class="help">Schränkt die Listen weiter ein. Ohne Liste gilt das Segment für alle Abonnenten. <a href="#/segments">Segmente verwalten</a></div></div>
                 <div class="help" id="audience"></div>
               </div>
               <div class="field"><label for="c-template">Vorlage</label>
@@ -208,6 +231,9 @@ export async function campaignEditorView(el, id) {
       ...d,
       list_ids: (d.list_ids || []).map(Number),
       template_id: d.template_id ? Number(d.template_id) : null,
+      segment_id: d.segment_id ? Number(d.segment_id) : null,
+      ab_test_percent: Number(d.ab_test_percent) || 0,
+      ab_wait_hours: Number(d.ab_wait_hours) || 4,
     };
   };
 
@@ -223,8 +249,8 @@ export async function campaignEditorView(el, id) {
   }, 400);
 
   const refreshAudience = debounce(async () => {
-    const { list_ids } = collect();
-    const { count } = await post('/campaigns/audience', { list_ids });
+    const { list_ids, segment_id } = collect();
+    const { count } = await post('/campaigns/audience', { list_ids, segment_id: segment_id || undefined });
     setText($('#audience', el), `${fmtNum(count)} aktive Empfänger (Duplikate werden nur einmal beliefert)`);
   }, 200);
 
@@ -239,7 +265,7 @@ export async function campaignEditorView(el, id) {
   });
   form.addEventListener('change', (e) => {
     markDirty();
-    if (e.target.name === 'list_ids') refreshAudience();
+    if (e.target.name === 'list_ids' || e.target.name === 'segment_id') refreshAudience();
     if (e.target.name === 'template_id') refreshPreview();
   });
 
@@ -354,8 +380,12 @@ export async function campaignEditorView(el, id) {
     'click',
     guarded(async () => {
       await save({ quiet: true });
-      const { count } = await post('/campaigns/audience', { list_ids: campaign.list_ids });
-      if (!(await confirmDialog('Jetzt senden?', `„${campaign.subject}“ wird jetzt an ${fmtNum(count)} Empfänger versendet. Dies kann nicht rückgängig gemacht werden.`, { submitLabel: 'Jetzt senden', danger: false }))) return;
+      const { count } = await post('/campaigns/audience', { list_ids: campaign.list_ids, segment_id: campaign.segment_id || undefined });
+      const ab = campaign.subject_b && campaign.ab_test_percent > 0;
+      const text = ab
+        ? `A/B-Test: ${campaign.ab_test_percent} % von ${fmtNum(count)} Empfängern erhalten jetzt Betreff A oder B, die übrigen nach ${campaign.ab_wait_hours} Stunden den Gewinner.`
+        : `„${campaign.subject}“ wird jetzt an ${fmtNum(count)} Empfänger versendet.`;
+      if (!(await confirmDialog('Jetzt senden?', `${text} Dies kann nicht rückgängig gemacht werden.`, { submitLabel: 'Jetzt senden', danger: false }))) return;
       await post(`/campaigns/${campaign.id}/send`);
       toast('Versand gestartet');
       navigate(`#/campaigns/${campaign.id}/report`);
@@ -377,6 +407,32 @@ export async function campaignEditorView(el, id) {
 
 // ---------------------------------------------------------------------------
 // Bericht
+
+/** Vergleich der beiden Betreffzeilen eines A/B-Tests. */
+function abCard(c, ab) {
+  const metric = c.ab_metric === 'clicks' ? 'click_rate' : 'open_rate';
+  const leader = ab.b[metric] > ab.a[metric] ? 'b' : 'a';
+  const pending = !c.ab_winner && ['sending', 'paused'].includes(c.status);
+  const row = (v, subject) => html`<tr>
+    <td><strong>${v.toUpperCase()}</strong> ${c.ab_winner === v ? html`<span class="badge badge-good">Gewinner</span>` : pending && leader === v ? html`<span class="badge badge-info">vorn</span>` : ''}</td>
+    <td style="overflow-wrap:anywhere">${subject}</td>
+    <td class="right num">${fmtNum(ab[v].sent)}</td>
+    <td class="right num">${fmtPct(ab[v].open_rate)}</td>
+    <td class="right num">${fmtPct(ab[v].click_rate)}</td>
+    <td class="right">${pending ? html`<button class="btn btn-sm" data-ab-win="${v}">Als Gewinner wählen</button>` : ''}</td></tr>`;
+  return html`<div class="card" style="margin-top:16px">
+    <div class="card-head"><h2>A/B-Test des Betreffs</h2>
+      <span class="muted small">${
+        c.ab_winner
+          ? `Entschieden nach ${c.ab_metric === 'clicks' ? 'Klickrate' : 'Öffnungsrate'}`
+          : pending
+            ? `Automatische Entscheidung ${c.ab_test_ends_at ? `am ${fmtDateTime(c.ab_test_ends_at)}` : ''} nach ${c.ab_metric === 'clicks' ? 'Klickrate' : 'Öffnungsrate'} · ${fmtNum(c.held_count)} Empfänger warten`
+            : ''
+      }</span></div>
+    <div class="table-wrap"><table><thead><tr><th>Variante</th><th>Betreff</th><th class="right">Zugestellt</th><th class="right">Öffnungsrate</th><th class="right">Klickrate</th><th></th></tr></thead>
+      <tbody>${row('a', c.subject)}${row('b', c.subject_b)}</tbody></table></div>
+  </div>`;
+}
 
 export async function campaignReportView(el, id) {
   let timer = null;
@@ -417,6 +473,7 @@ export async function campaignReportView(el, id) {
           <div class="card stat"><div class="label">Klickrate</div><div class="value">${fmtPct(c.click_rate)}</div><div class="hint">${fmtNum(c.unique_clicks)} eindeutig · Klick-zu-Öffnung ${fmtPct(t.click_to_open_rate)}</div></div>
           <div class="card stat"><div class="label">Abmeldungen</div><div class="value">${fmtNum(c.unsubscribes)}</div><div class="hint">${fmtNum(t.bounces)} Bounces/Beschwerden</div></div>
         </div>
+        ${report.ab ? abCard(c, report.ab) : ''}
         <div class="grid grid-2" style="margin-top:16px">
           <div class="card">
             <h2>Details</h2>
@@ -441,7 +498,7 @@ export async function campaignReportView(el, id) {
         <div class="card">
           <div class="card-head"><h2>Empfänger</h2>
             <select id="r-filter" style="max-width:200px" aria-label="Filter">
-              ${[['', 'Alle'], ['sent', 'Zugestellt'], ['opened', 'Geöffnet'], ['clicked', 'Geklickt'], ['queued', 'Wartend'], ['failed', 'Fehlgeschlagen'], ['skipped', 'Übersprungen']].map(
+              ${[['', 'Alle'], ['sent', 'Zugestellt'], ['opened', 'Geöffnet'], ['clicked', 'Geklickt'], ['queued', 'Wartend'], ['held', 'Wartet auf A/B'], ['failed', 'Fehlgeschlagen'], ['skipped', 'Übersprungen']].map(
                 ([k, v]) => html`<option value="${k}" ${state.filter === k ? raw('selected') : ''}>${v}</option>`,
               )}
             </select>
@@ -461,6 +518,19 @@ export async function campaignReportView(el, id) {
           toastError(err);
         }
       });
+    $$('[data-ab-win]', el).forEach((b) =>
+      b.addEventListener('click', async () => {
+        const v = b.dataset.abWin;
+        if (!(await confirmDialog('Gewinner festlegen', `Alle übrigen Empfänger erhalten jetzt Betreff ${v.toUpperCase()}.`, { submitLabel: 'Festlegen', danger: false }))) return;
+        try {
+          await post(`/campaigns/${id}/ab-winner`, { variant: v });
+          toast(`Betreff ${v.toUpperCase()} wird an die übrigen Empfänger versendet`);
+          render();
+        } catch (err) {
+          toastError(err);
+        }
+      }),
+    );
     act('#pause-btn', 'pause', 'Versand pausiert');
     act('#resume-btn', 'resume', 'Versand fortgesetzt');
     act('#cancel-btn', 'cancel', 'Versand abgebrochen', 'Versand endgültig abbrechen? Noch nicht versendete E-Mails werden verworfen.');
@@ -499,17 +569,18 @@ export async function campaignReportView(el, id) {
     const box = $('#recipients', el);
     setHtml(
       box,
-      html`<div class="table-wrap"><table><thead><tr><th>E-Mail</th><th>Status</th><th>Gesendet</th><th>Geöffnet</th><th>Klicks</th></tr></thead><tbody>${
+      html`<div class="table-wrap"><table><thead><tr><th>E-Mail</th><th>Status</th><th>Betreff</th><th>Gesendet</th><th>Geöffnet</th><th>Klicks</th></tr></thead><tbody>${
         data.items.length
           ? data.items.map(
               (r) => html`<tr>
                 <td>${r.subscriber_id ? html`<a href="#/subscribers/${r.subscriber_id}">${r.email}</a>` : r.email}</td>
                 <td>${badge(r.status, RECIPIENT_STATUS)}${r.error ? html`<div class="muted small">${r.error}</div>` : ''}</td>
+                <td class="small">${r.variant ? r.variant.toUpperCase() : '–'}</td>
                 <td class="nowrap small">${fmtDateTime(r.sent_at)}</td>
                 <td class="nowrap small">${r.opened_at ? `${fmtDateTime(r.opened_at)} (${r.open_count}×)` : '–'}</td>
                 <td class="num">${r.click_count || '–'}</td></tr>`,
             )
-          : html`<tr><td colspan="5" class="empty">Keine Empfänger.</td></tr>`
+          : html`<tr><td colspan="6" class="empty">Keine Empfänger.</td></tr>`
       }</tbody></table></div>`,
     );
     box.append(

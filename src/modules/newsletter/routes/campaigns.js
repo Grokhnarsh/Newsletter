@@ -16,6 +16,11 @@ const campaignSchema = {
   track_opens: { type: 'bool' },
   track_clicks: { type: 'bool' },
   archive: { type: 'bool' },
+  segment_id: { type: 'int', min: 1 },
+  subject_b: { type: 'string', max: 300 },
+  ab_test_percent: { type: 'int', min: 0, max: 100 },
+  ab_wait_hours: { type: 'int', min: 1, max: 168 },
+  ab_metric: { type: 'enum', values: ['opens', 'clicks'] },
 };
 
 function checkOptionalEmails(data) {
@@ -28,12 +33,16 @@ function checkOptionalEmails(data) {
   return data;
 }
 
-export function campaignRoutes({ campaigns, lists, templates, subscribers, delivery }) {
+export function campaignRoutes({ campaigns, lists, templates, subscribers, delivery, segments }) {
   const router = Router();
 
-  const checkRefs = (data) => {
+  const checkRefs = (data, body = {}) => {
     if (data.list_ids) lists.assertExist(data.list_ids);
     if (data.template_id) templates.find(data.template_id);
+    if (data.segment_id) segments.find(data.segment_id);
+    // Segment entfernen: segment_id: null
+    if (body && 'segment_id' in body && !body.segment_id) data.segment_id = null;
+    return data;
   };
 
   router.get('/', (req, res) => res.json(campaigns.list({ status: req.query.status })));
@@ -41,7 +50,7 @@ export function campaignRoutes({ campaigns, lists, templates, subscribers, deliv
   router.post('/', (req, res) => {
     const data = checkOptionalEmails(validate(req.body, campaignSchema, { partial: true }));
     if (!data.name) throw badRequest('Validierung fehlgeschlagen', { name: 'Pflichtfeld' });
-    checkRefs(data);
+    checkRefs(data, req.body);
     res.status(201).json(campaigns.create(data, req.user?.id));
   });
 
@@ -59,15 +68,16 @@ export function campaignRoutes({ campaigns, lists, templates, subscribers, deliv
   });
 
   router.post('/audience', (req, res) => {
-    const { list_ids } = validate(req.body, { list_ids: { type: 'ids', default: () => [] } });
-    res.json({ count: campaigns.audienceCount(list_ids) });
+    const target = validate(req.body, { list_ids: { type: 'ids', default: () => [] }, segment_id: { type: 'int', min: 1 } });
+    if (target.segment_id) segments.find(target.segment_id);
+    res.json({ count: campaigns.audienceCount(target) });
   });
 
   router.get('/:id', (req, res) => res.json(campaigns.find(parseId(req.params.id))));
 
   router.put('/:id', (req, res) => {
     const data = checkOptionalEmails(validate(req.body, campaignSchema, { partial: true }));
-    checkRefs(data);
+    checkRefs(data, req.body);
     res.json(campaigns.update(parseId(req.params.id), data));
   });
 
@@ -114,6 +124,14 @@ export function campaignRoutes({ campaigns, lists, templates, subscribers, deliv
   router.post('/:id/pause', (req, res) => res.json(campaigns.pause(parseId(req.params.id))));
   router.post('/:id/resume', (req, res) => res.json(campaigns.resume(parseId(req.params.id))));
   router.post('/:id/cancel', (req, res) => res.json(campaigns.cancel(parseId(req.params.id))));
+
+  // A/B-Test vorzeitig entscheiden
+  router.post('/:id/ab-winner', (req, res) => {
+    const { variant } = validate(req.body, { variant: { type: 'enum', values: ['a', 'b'], required: true } });
+    const campaign = campaigns.setAbWinner(parseId(req.params.id), variant);
+    if (delivery.timer) setImmediate(() => delivery.tick());
+    res.json(campaign);
+  });
 
   router.get('/:id/report', (req, res) => res.json(campaigns.report(parseId(req.params.id))));
 

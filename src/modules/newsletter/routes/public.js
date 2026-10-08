@@ -13,6 +13,14 @@ const SUCCESS_MESSAGE = {
   done: 'Vielen Dank! Deine Anmeldung war erfolgreich.',
 };
 
+const truthy = (v) => ['1', 'true', 'on', 'yes', true, 1].includes(v);
+
+/** Optionale Einwilligung ins Tracking (nur im Tracking-Modus „consent“). */
+function trackingConsentField(settings, checked = false) {
+  if (settings.get('tracking_mode') !== 'consent') return '';
+  return `<label class="check"><input type="checkbox" name="tracking_consent" value="1"${checked ? ' checked' : ''}><span class="muted">${escapeHtml(settings.get('tracking_consent_text'))}</span></label>`;
+}
+
 function wantsHtml(req) {
   return !req.is('application/json') && req.accepts(['json', 'html']) === 'html';
 }
@@ -33,6 +41,7 @@ export function subscribeFormHtml({ lists, settings }, { title = 'Newsletter abo
     <label class="check"><input type="checkbox" name="consent" value="1" required><span class="muted">Ich stimme dem Empfang des Newsletters zu${
       privacy ? ` (<a href="${escapeHtml(privacy)}">Datenschutz</a>)` : ''
     }.</span></label>
+    ${trackingConsentField(settings)}
   </form>
 </div>`;
 }
@@ -41,7 +50,7 @@ export function subscribeFormHtml({ lists, settings }, { title = 'Newsletter abo
  * Öffentliche Seiten: Anmeldung, Bestätigung, Abmeldung, Präferenzen, Tracking, Archiv.
  * Liefert zwei Router: `web` (Website) und `api` (unter /api, ohne Anmeldung).
  */
-export function publicRoutes({ subscribers, lists, settings, delivery, campaigns, logger, site }) {
+export function publicRoutes({ subscribers, lists, settings, delivery, campaigns, logger, site, hooks }) {
   const router = Router();
   const apiRouter = Router();
   const form = express.urlencoded({ extended: false, limit: '20kb' });
@@ -143,6 +152,7 @@ export function publicRoutes({ subscribers, lists, settings, delivery, campaigns
   <label class="check"><input type="checkbox" name="consent" value="1" required><span class="muted">Ich möchte den Newsletter erhalten und habe die ${
     privacy ? `<a href="${escapeHtml(privacy)}" target="_blank" rel="noopener">Datenschutzerklärung</a>` : 'Datenschutzerklärung'
   } gelesen.</span></label>
+  ${trackingConsentField(settings)}
   <button type="submit">Jetzt abonnieren</button>
 </form>
 <hr><p class="muted"><a href="/archive">Bisherige Ausgaben ansehen</a></p>`,
@@ -164,7 +174,7 @@ export function publicRoutes({ subscribers, lists, settings, delivery, campaigns
 
     const email = normalizeEmail(body.email);
     if (!isEmail(email)) return respond(400, 'Bitte gib eine gültige E-Mail-Adresse ein.', false);
-    if (!['1', 'true', 'on', 'yes', true, 1].includes(body.consent)) {
+    if (!truthy(body.consent)) {
       return respond(400, 'Bitte bestätige, dass du den Newsletter erhalten möchtest.', false);
     }
 
@@ -182,6 +192,7 @@ export function publicRoutes({ subscribers, lists, settings, delivery, campaigns
         last_name: clip(body.last_name, 100),
         list_ids: listIds,
         attributes: Object.fromEntries(Object.entries(attributes).slice(0, 20).map(([k, v]) => [clip(k, 50), clip(v, 500)])),
+        tracking_consent: settings.get('tracking_mode') === 'consent' ? truthy(body.tracking_consent) : undefined,
       },
       { ip: req.ip, doubleOptIn, source: req.originalUrl.startsWith('/api') ? 'api' : 'form' },
     );
@@ -192,6 +203,7 @@ export function publicRoutes({ subscribers, lists, settings, delivery, campaigns
     } catch (err) {
       logger.error('[subscribe] E-Mail konnte nicht gesendet werden:', err.message);
     }
+    if (action === 'welcome') await hooks.emit('newsletter.subscribed', subscribers.find(subscriber.id));
     // Einheitliche Antwort – verrät nicht, ob die Adresse bereits eingetragen ist.
     respond(200, doubleOptIn ? SUCCESS_MESSAGE.confirm : SUCCESS_MESSAGE.done);
   };
@@ -246,6 +258,7 @@ export function publicRoutes({ subscribers, lists, settings, delivery, campaigns
       } catch (err) {
         logger.error('[confirm] Willkommens-Mail fehlgeschlagen:', err.message);
       }
+      await hooks.emit('newsletter.subscribed', subscribers.find(confirmed.id));
     } else if (subscriber.status !== 'active') {
       return html(res, 410, messagePage({ title: 'Nicht möglich', message: 'Dieses Abonnement kann nicht mehr bestätigt werden. Bitte melde dich erneut an.', tone: 'err' }));
     }
@@ -322,6 +335,7 @@ ${notice ? `<p class="ok">${escapeHtml(notice)}</p>` : ''}
           .join('')}`
       : ''
   }
+  ${trackingConsentField(settings, subscriber.tracking_consent)}
   ${!active && subscriber.status === 'unsubscribed' ? '<label class="check"><input type="checkbox" name="resubscribe" value="1"><span>Newsletter wieder abonnieren</span></label>' : ''}
   <button type="submit">Speichern</button>
 </form>
@@ -349,7 +363,12 @@ ${active ? `<form method="post" action="/unsubscribe/${escapeHtml(subscriber.tok
     const listIds = [].concat(body.list_ids ?? []).map(Number);
     let updated = subscribers.updatePreferences(
       req.params.token,
-      { first_name: String(body.first_name ?? '').trim().slice(0, 100), last_name: String(body.last_name ?? '').trim().slice(0, 100), list_ids: listIds },
+      {
+        first_name: String(body.first_name ?? '').trim().slice(0, 100),
+        last_name: String(body.last_name ?? '').trim().slice(0, 100),
+        list_ids: listIds,
+        tracking_consent: settings.get('tracking_mode') === 'consent' ? truthy(body.tracking_consent) : undefined,
+      },
       publicIds,
     );
     if (body.resubscribe && updated.status === 'unsubscribed') {
@@ -441,7 +460,7 @@ ${active ? `<form method="post" action="/unsubscribe/${escapeHtml(subscriber.tok
   router.get('/view/:token', (req, res) => {
     const recipient = campaigns.recipientByToken(req.params.token);
     if (!recipient) return notFoundPage(res);
-    const campaign = campaigns.find(recipient.campaign_id);
+    const campaign = delivery.forVariant(campaigns.find(recipient.campaign_id), recipient.variant);
     const subscriber = recipient.subscriber_id ? subscribers.find(recipient.subscriber_id) : null;
     const rendered = delivery.renderForRecipient(campaign, subscriber, recipient.token, { tracking: false });
     sendEmailHtml(res, rendered.html);

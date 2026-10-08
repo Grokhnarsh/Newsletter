@@ -18,7 +18,7 @@ function shape(row) {
   } catch {
     attrs = {};
   }
-  return { ...rest, attributes: attrs };
+  return { ...rest, attributes: attrs, tracking_consent: Boolean(rest.tracking_consent) };
 }
 
 export class SubscriberService {
@@ -304,15 +304,16 @@ export class SubscriberService {
    * Anmeldung über das öffentliche Formular.
    * Rückgabe: { subscriber, action } mit action ∈ confirm | welcome | none
    */
-  publicSubscribe({ email, first_name = '', last_name = '', list_ids, attributes = {} }, { ip, doubleOptIn, source = 'form' }) {
+  publicSubscribe({ email, first_name = '', last_name = '', list_ids, attributes = {}, tracking_consent }, { ip, doubleOptIn, source = 'form' }) {
     return this.db.transaction(() => {
       const existing = this.findByEmail(email);
       if (!existing) {
-        const subscriber = this.create(
+        const created = this.create(
           { email, first_name, last_name, attributes, list_ids, status: doubleOptIn ? 'pending' : 'active' },
           { source, ip },
         );
-        return { subscriber, action: doubleOptIn ? 'confirm' : 'welcome' };
+        if (tracking_consent) this.setTrackingConsent(created.id, true);
+        return { subscriber: this.find(created.id), action: doubleOptIn ? 'confirm' : 'welcome' };
       }
 
       // Gesperrte Adressen (Bounce/Beschwerde) werden nicht verändert.
@@ -336,6 +337,7 @@ export class SubscriberService {
         now(),
         existing.id,
       );
+      if (tracking_consent !== undefined) this.setTrackingConsent(existing.id, Boolean(tracking_consent));
       // Wer sich abgemeldet hat, wird nur nach eigener Bestätigung wieder aktiv.
       if (doubleOptIn || existing.status === 'unsubscribed') {
         this.setStatus(existing.id, 'pending');
@@ -366,10 +368,19 @@ export class SubscriberService {
     return this.find(subscriber.id);
   }
 
+  /** Einwilligung in die Auswertung von Öffnungen und Klicks (Tracking-Modus „consent“). */
+  setTrackingConsent(id, consent) {
+    const current = this.db.get('SELECT tracking_consent FROM subscribers WHERE id = ?', id);
+    if (!current || Boolean(current.tracking_consent) === consent) return;
+    this.db.run('UPDATE subscribers SET tracking_consent = ?, tracking_consent_at = ?, updated_at = ? WHERE id = ?', consent ? 1 : 0, now(), now(), id);
+    this.logEvent(consent ? 'tracking_consent_given' : 'tracking_consent_withdrawn', id);
+  }
+
   /** Aktualisiert Einstellungen über die Präferenzseite (nur öffentliche Listen). */
-  updatePreferences(token, { first_name, last_name, list_ids }, publicListIds) {
+  updatePreferences(token, { first_name, last_name, list_ids, tracking_consent }, publicListIds) {
     const subscriber = this.findByToken(token);
     return this.db.transaction(() => {
+      if (tracking_consent !== undefined) this.setTrackingConsent(subscriber.id, tracking_consent);
       this.db.run(
         'UPDATE subscribers SET first_name = ?, last_name = ?, updated_at = ? WHERE id = ?',
         first_name ?? subscriber.first_name,

@@ -8,10 +8,13 @@ import { requireAdmin } from '../../middleware/auth.js';
 import { migrations } from './migrations.js';
 import { campaignRoutes } from './routes/campaigns.js';
 import { publicRoutes, subscribeFormHtml } from './routes/public.js';
+import { automationRoutes, bounceWebhookRoutes, segmentRoutes, webhookAdminRoutes } from './routes/marketing.js';
 import { listRoutes, subscriberRoutes, templateRoutes, webhookRoutes } from './routes/subscribers.js';
+import { AutomationService } from './services/automations.js';
 import { CampaignService } from './services/campaigns.js';
 import { DeliveryService } from './services/delivery.js';
 import { ListService } from './services/lists.js';
+import { SegmentService } from './services/segments.js';
 import { StatsService } from './services/stats.js';
 import { SubscriberService } from './services/subscribers.js';
 import { TemplateService } from './services/templates.js';
@@ -31,6 +34,9 @@ const settings = {
     welcome_enabled: false,
     welcome_subject: 'Willkommen bei {{site_name}}!',
     welcome_html: '<p>Hallo {{first_name | "zusammen"}},</p>\n<p>schön, dass du dabei bist! Ab sofort erhältst du unseren Newsletter.</p>',
+    // all = immer (berechtigtes Interesse), consent = nur mit Einwilligung, off = nie
+    tracking_mode: 'all',
+    tracking_consent_text: 'Ich bin einverstanden, dass ausgewertet wird, ob ich Newsletter öffne und welche Links ich anklicke, damit die Inhalte besser werden. Widerruf jederzeit in den Newsletter-Einstellungen.',
   },
   rules: {
     double_opt_in: { type: 'bool' },
@@ -43,6 +49,8 @@ const settings = {
     welcome_enabled: { type: 'bool' },
     welcome_subject: { type: 'string', max: 300 },
     welcome_html: { type: 'string', max: 100000, trim: false },
+    tracking_mode: { type: 'enum', values: ['all', 'consent', 'off'] },
+    tracking_consent_text: { type: 'string', max: 1000 },
   },
 };
 
@@ -72,8 +80,8 @@ function campaignFromPost(ctx, post, userId) {
 export default {
   name: 'newsletter',
   label: 'Newsletter',
-  description: 'Abonnenten, Listen, Double-Opt-in, Kampagnen mit Tracking und Versand-Worker.',
-  version: '2.0.0',
+  description: 'Abonnenten, Listen, Segmente, Double-Opt-in, Kampagnen mit A/B-Test und Tracking, Automationen, Bounce-Webhooks.',
+  version: '3.0.0',
   migrations,
   settings,
   adminDir: path.join(dir, 'admin'),
@@ -83,15 +91,20 @@ export default {
     ctx.lists = new ListService(db);
     ctx.subscribers = new SubscriberService(db);
     ctx.templates = new TemplateService(db);
-    ctx.campaigns = new CampaignService(db, { templates: ctx.templates, settings: ctx.settings });
+    ctx.segments = new SegmentService(db);
+    ctx.campaigns = new CampaignService(db, { templates: ctx.templates, settings: ctx.settings, segments: ctx.segments });
     ctx.delivery = new DeliveryService({
       db, config, mailer, logger, settings: ctx.settings, templates: ctx.templates, campaigns: ctx.campaigns, subscribers: ctx.subscribers,
       isEnabled: () => ctx.modules.isEnabled('newsletter'),
     });
+    ctx.automations = new AutomationService(db, { delivery: ctx.delivery, logger });
+    ctx.delivery.automations = ctx.automations;
     ctx.newsletterStats = new StatsService(db, { campaigns: ctx.campaigns });
     ctx.newsletterPublic = publicRoutes(ctx);
 
     const opts = { module: 'newsletter' };
+    // Neue Anmeldungen (bestätigt bzw. ohne Double-Opt-in) starten passende Automationen
+    hooks.on('newsletter.subscribed', (subscriber) => ctx.automations.enroll(subscriber), opts);
     hooks.on('site.reserved', () => ['subscribe', 'unsubscribe', 'confirm', 'preferences', 't', 'view', 'archive'], opts);
     hooks.on(
       'system.setup',
@@ -134,6 +147,9 @@ export default {
     router.use('/templates', templateRoutes(ctx));
     router.use('/campaigns', campaignRoutes(ctx));
     router.use('/webhooks', webhookRoutes(ctx));
+    router.use('/segments', segmentRoutes(ctx));
+    router.use('/automations', automationRoutes(ctx));
+    router.use('/newsletter', webhookAdminRoutes(ctx));
 
     const extra = Router();
     extra.get('/stats/overview', (req, res) => {
@@ -160,6 +176,7 @@ export default {
 
   publicApi(router, ctx) {
     router.use(ctx.newsletterPublic.api);
+    router.use(bounceWebhookRoutes(ctx));
   },
 
   publicRoutes(router, ctx) {
